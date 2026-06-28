@@ -254,6 +254,10 @@ void setAppState(AppState newState) {
       ledcWriteTone(0, 0);
       buzzerActive = false;
     }
+    // Stop DAC audio when leaving speaking state
+    if (oldState == STATE_SPEAKING) {
+      playAudioStop();
+    }
     
     // Dissolve only on button press (Clock → Waving Intro) — skip for greeting and routine transitions
     if (oldState == STATE_CLOCK && currentState == STATE_WAVING_INTRO && !greetingMode) {
@@ -1212,6 +1216,7 @@ void loop() {
         serverDuration = (unsigned long)(response.substring(9).toFloat() * 1000.0f);
       }
       else if (response.startsWith("UI_LIST:")) {
+        serverDuration = 0;  // Clear any stale duration
         String listContent = response.substring(8);
         listContent.replace("|", " "); // replace pipe with space for wrapping
         currentResponseText = listContent;

@@ -413,6 +413,8 @@ class VoiceAgentHandler:
         self.keyword_buffer = bytearray()
         self.keyword_chunk_start = time.time()
         self.last_keyword_trigger = 0
+        # TCP framing buffer — accumulates partial recv() data across calls
+        self.recv_buffer = bytearray()
         # Socket write lock — prevents interleaved sendall from two threads
         self.send_lock = threading.Lock()
         # Enable TCP_NODELAY to avoid Nagle delays on small state commands
@@ -594,65 +596,78 @@ class VoiceAgentHandler:
                 if not data:
                     break
                 
-                # Check for command from client (button pressed)
-                if data.startswith(b"CMD:"):
-                    cmd = data.decode('utf-8', errors='ignore').strip()
-                    if cmd == "CMD:WOKE":
-                        self.is_awake = True
-                        self.speech_buffer = bytearray()
-                        self.recording_start_time = time.time()
-                        self.speech_ready_time = time.time() + 1.0  # skip TCP leftovers (waving is 1.2s on ESP32)
-                        self.audio_bytes_received = 0
-                        self.first_audio_time = 0
-                        print("\n[*] Button pressed: recording started...")
-                    continue
-
-                # Check for LDR sensor reading (may arrive mid-chunk due to TCP merging)
-                ldr_pos = data.find(b"LDR:")
-                if ldr_pos >= 0:
-                    try:
-                        ldr_chunk = data[ldr_pos:ldr_pos+12]
-                        ldr_str = ldr_chunk.decode('utf-8', errors='ignore').strip()
-                        ldr_value = int(ldr_str.split(":")[1])
-                        print(f"[*] LDR: {ldr_value} (0-4095)")
-                    except Exception:
-                        pass
-                    
-                # Check for button released (only when actually recording)
-                if self.is_awake and b"___END___" in data:
-                    print("[*] Button released: recording stopped")
-                    clean_data = data.split(b"___END___")[0]
-                    if time.time() >= self.speech_ready_time:
-                        self.speech_buffer.extend(clean_data)
-                        self.audio_bytes_received += len(clean_data)
-                    duration = time.time() - self.recording_start_time
-                    self.process_speech(self.speech_buffer, duration)
-                    self.speech_buffer = bytearray()
-                    self.is_awake = False
-                    continue
+                # Accumulate into recv_buffer for framing
+                self.recv_buffer.extend(data)
                 
-                # Always feed keyword detection buffer (non-CMD, non-LDR data only)
-                if not data.startswith(b"CMD:"):
-                    # Strip LDR lines to avoid polluting keyword audio
-                    clean = data
-                    while True:
-                        ldr_start = clean.find(b"LDR:")
-                        if ldr_start < 0:
-                            break
-                        ldr_end = clean.find(b"\n", ldr_start)
-                        if ldr_end < 0:
-                            clean = clean[:ldr_start]
-                            break
-                        clean = clean[:ldr_start] + clean[ldr_end+1:]
-                    if clean:
-                        self.keyword_buffer.extend(clean)
-
-                # Only stream audio if we are awake (button held) and past waving delay
-                if self.is_awake and time.time() >= self.speech_ready_time:
-                    if self.first_audio_time == 0:
-                        self.first_audio_time = time.time()
-                    self.audio_bytes_received += len(data)
-                    self.speech_buffer.extend(data)
+                # Process complete newline-delimited commands
+                while True:
+                    nl_pos = self.recv_buffer.find(b"\n")
+                    if nl_pos < 0:
+                        break  # no complete line yet
+                    
+                    line = bytes(self.recv_buffer[:nl_pos])
+                    self.recv_buffer = self.recv_buffer[nl_pos+1:]
+                    
+                    # CMD:WOKE
+                    if line.startswith(b"CMD:"):
+                        cmd = line.decode('utf-8', errors='ignore').strip()
+                        if cmd == "CMD:WOKE":
+                            self.is_awake = True
+                            self.speech_buffer = bytearray()
+                            self.recording_start_time = time.time()
+                            self.speech_ready_time = time.time() + 1.0
+                            self.audio_bytes_received = 0
+                            self.first_audio_time = 0
+                            print("\n[*] Button pressed: recording started...")
+                        continue
+                    
+                    # ___END___
+                    if line == b"___END___":
+                        if self.is_awake:
+                            print("[*] Button released: recording stopped")
+                            duration = time.time() - self.recording_start_time
+                            self.process_speech(self.speech_buffer, duration)
+                            self.speech_buffer = bytearray()
+                            self.is_awake = False
+                        continue
+                    
+                    # LDR:xxx
+                    if line.startswith(b"LDR:"):
+                        try:
+                            ldr_str = line.decode('utf-8', errors='ignore').strip()
+                            ldr_value = int(ldr_str.split(":")[1])
+                            print(f"[*] LDR: {ldr_value} (0-4095)")
+                        except Exception:
+                            pass
+                        continue
+                
+                # Anything left in recv_buffer that's not a partial command goes to audio
+                if self.recv_buffer:
+                    # Check for partial ___END___ at tail (might span next recv)
+                    if self.recv_buffer.endswith(b"___END___") or self.recv_buffer.endswith(b"___END"):
+                        pass  # wait for more data to complete the delimiter
+                    else:
+                        # Feed to keyword buffer (strip LDR lines)
+                        clean = bytes(self.recv_buffer)
+                        self.recv_buffer = bytearray()
+                        while True:
+                            ldr_start = clean.find(b"LDR:")
+                            if ldr_start < 0:
+                                break
+                            ldr_end = clean.find(b"\n", ldr_start)
+                            if ldr_end < 0:
+                                clean = clean[:ldr_start]
+                                break
+                            clean = clean[:ldr_start] + clean[ldr_end+1:]
+                        if clean:
+                            self.keyword_buffer.extend(clean)
+                        
+                        # Feed to speech buffer if awake
+                        if self.is_awake and time.time() >= self.speech_ready_time:
+                            if self.first_audio_time == 0:
+                                self.first_audio_time = time.time()
+                            self.audio_bytes_received += len(clean)
+                            self.speech_buffer.extend(clean)
             except socket.timeout:
                 print(f"[Timeout] No data from {self.addr} for 30s, disconnecting")
                 break
