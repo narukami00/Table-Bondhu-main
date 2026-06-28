@@ -554,6 +554,7 @@ void updateAnimations() {
       i2s_adc_disable(I2S_NUM_0);
       cachedLdr = analogRead(LDR_PIN);
       i2s_adc_enable(I2S_NUM_0);
+      client.print("LDR:" + String(cachedLdr) + "\n");
       
       int detectedTheme = ldrToTheme(cachedLdr);
       if (detectedTheme == pendingTheme) {
@@ -1096,7 +1097,7 @@ void loop() {
   else if (!buttonPressed && lastButtonState) {
     // Button just released — end recording
     isRecording = false;
-    client.print("___END___");
+    client.print("___END___\n");
   }
   lastButtonState = buttonPressed;
 
