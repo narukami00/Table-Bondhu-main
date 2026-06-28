@@ -111,6 +111,15 @@ void switchTheme(int idx) {
 // Buffer for pushThemedImage (sprite background replacement)
 static uint16_t themedBuf[128 * 128];
 
+void pushThemedImage(TFT_eSprite &spr, int x, int y, int w, int h, const uint16_t *data) {
+  int total = w * h;
+  memcpy(themedBuf, data, total * sizeof(uint16_t));
+  for (int i = 0; i < total; i++) {
+    if (themedBuf[i] == ASSET_BG) themedBuf[i] = COLOR_BG;
+  }
+  spr.pushImage(x, y, w, h, themedBuf);
+}
+
 // Sprite frame macros (reference images.h arrays, independent of runtime colors)
 #if ACTIVE_THEME == THEME_PIKACHU
   #define CURRENT_IDLE pika_idle
@@ -311,7 +320,7 @@ void drawAvatar() {
   // Draw avatar to sprite and push with flashing background if in Alarm state
   uint16_t bgCol = (currentState == STATE_ALARM && alarmFlashState) ? TFT_RED : COLOR_BG;
   faceSprite.fillSprite(bgCol);
-  faceSprite.pushImage(0, 0, 128, 128, frameData);
+  pushThemedImage(faceSprite, 0, 0, 128, 128, frameData);
   faceSprite.pushSprite(shakeX, shakeY);
 }
 
@@ -364,7 +373,7 @@ void drawCameoFrame() {
     cameoSprite.createSprite(w, h);
     cameoSprite.setSwapBytes(true);
     cameoSprite.fillSprite(COLOR_BG);
-    cameoSprite.pushImage(0, 0, w, h, frameData);
+    pushThemedImage(cameoSprite, 0, 0, w, h, frameData);
     cameoSprite.pushSprite(0, yPos);
     cameoSprite.deleteSprite();
   }
@@ -383,7 +392,7 @@ void drawWaveFrame() {
 
   if (frameData != NULL) {
     faceSprite.fillSprite(COLOR_BG);
-    faceSprite.pushImage(0, 0, 128, 128, frameData);
+    pushThemedImage(faceSprite, 0, 0, 128, 128, frameData);
     faceSprite.pushSprite(shakeX, shakeY);
   }
 }
