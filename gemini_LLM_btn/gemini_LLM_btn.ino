@@ -10,6 +10,7 @@
 #include "images.h"
 
 #define BUTTON_PIN 14 // Tactile Button (GND + D14)
+#define BOOT_BTN 0    // Built-in BOOT button for text pagination
 #define LDR_PIN 34   // ADC1_CH6 - Light Dependent Resistor
 #define BUZZER_PIN 13 // Active Buzzer (HIGH = sound)
 #define I2S_SAMPLE_RATE 16000
@@ -21,14 +22,79 @@
 // SELECT YOUR ACTIVE THEME HERE
 #define ACTIVE_THEME THEME_PIKACHU
 
+// Default colors from compile-time theme (copied to runtime vars in setup)
 #if ACTIVE_THEME == THEME_PIKACHU
-  #define COLOR_BG 0x18E6     // Pokebox Indigo #1C1F35
-  #define COLOR_ACCENT 0xFEE0 // Pikachu Yellow #FFDE00
-  #define COLOR_BORDER 0xFEE0 // Pikachu Yellow
-  #define COLOR_BUBBLE_BG TFT_BLACK
-  #define COLOR_TEXT TFT_WHITE
-  #define COLOR_STATUS TFT_RED  // Pokedex Red
-  
+  #define DEFAULT_BG 0x18E6
+  #define DEFAULT_ACCENT 0xFEE0
+  #define DEFAULT_BORDER 0xFEE0
+  #define DEFAULT_BUBBLE_BG TFT_BLACK
+  #define DEFAULT_TEXT TFT_WHITE
+  #define DEFAULT_STATUS TFT_RED
+  #define ASSET_BG 0x18E6
+#else
+  #define DEFAULT_BG 0x911C
+  #define DEFAULT_ACCENT TFT_CYAN
+  #define DEFAULT_BORDER TFT_CYAN
+  #define DEFAULT_BUBBLE_BG TFT_BLACK
+  #define DEFAULT_TEXT TFT_WHITE
+  #define DEFAULT_STATUS TFT_GREEN
+  #define ASSET_BG 0x911C
+#endif
+
+// Runtime color variables (changed by theme switching)
+uint16_t COLOR_BG = DEFAULT_BG;
+uint16_t COLOR_ACCENT = DEFAULT_ACCENT;
+uint16_t COLOR_BORDER = DEFAULT_BORDER;
+uint16_t COLOR_BUBBLE_BG = DEFAULT_BUBBLE_BG;
+uint16_t COLOR_TEXT = DEFAULT_TEXT;
+uint16_t COLOR_STATUS = DEFAULT_STATUS;
+
+// Adaptive theme: 4-level LDR-based palettes
+struct ThemePalette {
+  uint16_t bg, accent, border, bubbleBg, text, status;
+};
+
+const ThemePalette THEMES[4] = {
+  { 0x0000, 0xF800, 0xF800, 0x0000, 0xFFFF, 0xF800 },  // Night: dark bg, red accent
+  { 0x4100, 0xFBE0, 0xFBE0, 0x0000, 0xFFFF, 0xFDA0 },  // Autumn: dark orange bg, yellow
+  { 0x0320, 0x07E0, 0x07E0, 0x0000, 0xFFFF, 0x07E0 },  // Spring: dark green bg, green
+  { DEFAULT_BG, DEFAULT_ACCENT, DEFAULT_BORDER, DEFAULT_BUBBLE_BG, DEFAULT_TEXT, DEFAULT_STATUS }  // Bright: default
+};
+
+#define LDR_CONFIRM_READS 3
+#define THEME_COOLDOWN_MS 60000
+
+int activeTheme = 3;  // Start at default
+int pendingTheme = -1;
+int pendingCount = 0;
+unsigned long lastSwitchMs = 0;
+unsigned long lastThemeLdrMs = 0;
+int cachedLdr = 2048;
+
+int ldrToTheme(int ldr) {
+  if (ldr < 300) return 0;       // Night
+  if (ldr < 1000) return 1;      // Autumn
+  if (ldr < 1700) return 2;      // Spring
+  return 3;                       // Bright
+}
+
+void switchTheme(int idx) {
+  activeTheme = idx;
+  COLOR_BG = THEMES[idx].bg;
+  COLOR_ACCENT = THEMES[idx].accent;
+  COLOR_BORDER = THEMES[idx].border;
+  COLOR_BUBBLE_BG = THEMES[idx].bubbleBg;
+  COLOR_TEXT = THEMES[idx].text;
+  COLOR_STATUS = THEMES[idx].status;
+  tft.fillScreen(COLOR_BG);
+  Serial.printf("[THEME] Switched to theme %d (LDR=%d)\n", idx, cachedLdr);
+}
+
+// Buffer for pushThemedImage (sprite background replacement)
+static uint16_t themedBuf[128 * 128];
+
+// Sprite frame macros (reference images.h arrays, independent of runtime colors)
+#if ACTIVE_THEME == THEME_PIKACHU
   #define CURRENT_IDLE pika_idle
   #define CURRENT_HALF_BLINK pika_half_blink
   #define CURRENT_SMILE_BLINK pika_smile_blink
@@ -39,13 +105,6 @@
   #define CURRENT_SMILE pika_smile
   #define CAMEO_FRAME_COUNT 7
 #else
-  #define COLOR_BG 0x911C     // Purple #9023e1
-  #define COLOR_ACCENT TFT_CYAN
-  #define COLOR_BORDER TFT_CYAN
-  #define COLOR_BUBBLE_BG TFT_BLACK
-  #define COLOR_TEXT TFT_WHITE
-  #define COLOR_STATUS TFT_GREEN
-  
   #define CURRENT_IDLE avatar_idle
   #define CURRENT_HALF_BLINK avatar_half_blink
   #define CURRENT_SMILE_BLINK avatar_smile_blink
@@ -105,6 +164,11 @@ unsigned long lastNtpRetryMs = 0;
 const unsigned long NTP_RETRY_INTERVAL_MS = 30000;
 
 String currentResponseText = "";
+String lastBubbleText = "";  // Anti-flicker: only redraw when text changes
+unsigned long serverDuration = 0;  // Server-provided audio duration override
+int textPage = 0;           // Current page of text being displayed
+int textTotalPages = 0;     // Total pages for current text
+bool lastBootBtnState = false; // Edge detection for BOOT button
 int mouthFrame = 0;
 int blinkFrame = 0;
 bool isBlinking = false;
@@ -205,8 +269,10 @@ void setAppState(AppState newState) {
     } else if (currentState == STATE_THINKING) {
       drawThinkingOverlay();
     } else if (currentState == STATE_SPEAKING) {
+      lastBubbleText = "";  // Force bubble redraw on new text
       drawBubbleText(currentResponseText);
     } else if (currentState == STATE_ALARM) {
+      lastBubbleText = "";  // Force bubble redraw on new text
       drawBubbleText(currentResponseText);
     }
   }
@@ -388,13 +454,20 @@ void drawClockFace() {
   tft.println(dateStr);
   
   char timeStr[16];
-  strftime(timeStr, sizeof(timeStr), "%H:%M", &timeinfo);
+  strftime(timeStr, sizeof(timeStr), "%I:%M", &timeinfo);
+  const char* ampm = (timeinfo.tm_hour >= 12) ? "PM" : "AM";
   
   tft.setTextColor(TFT_WHITE, COLOR_BG);
   tft.setTextSize(3);
   int timeWidth = strlen(timeStr) * 18;
-  tft.setCursor((128 - timeWidth) / 2, 65);
+  tft.setCursor((128 - timeWidth) / 2, 55);
   tft.print(timeStr);
+  
+  // AM/PM below the time
+  tft.setTextSize(1);
+  int ampmWidth = strlen(ampm) * 6;
+  tft.setCursor((128 - ampmWidth) / 2, 85);
+  tft.print(ampm);
   
   tft.drawRoundRect(10, 115, 108, 30, 4, COLOR_BORDER);
   tft.setTextColor(COLOR_STATUS, COLOR_BG);
@@ -424,12 +497,15 @@ void drawIdleOverlay() {
   tft.fillTriangle(64, 106, 61, 110, 67, 110, COLOR_BUBBLE_BG);
   
   char timeStr[16];
-  strftime(timeStr, sizeof(timeStr), "%H:%M", &timeinfo);
+  strftime(timeStr, sizeof(timeStr), "%I:%M", &timeinfo);
+  const char* ampm = (timeinfo.tm_hour >= 12) ? "PM" : "AM";
+  char idleTimeStr[20];
+  snprintf(idleTimeStr, sizeof(idleTimeStr), "%s %s", timeStr, ampm);
   tft.setTextColor(COLOR_TEXT, COLOR_BUBBLE_BG);
   tft.setTextSize(2);
-  int timeWidth = strlen(timeStr) * 12;
+  int timeWidth = strlen(idleTimeStr) * 12;
   tft.setCursor(4 + (120 - timeWidth) / 2, 116);
-  tft.print(timeStr);
+  tft.print(idleTimeStr);
   
   tft.setTextColor(COLOR_STATUS, COLOR_BUBBLE_BG);
   tft.setTextSize(1);
@@ -445,6 +521,29 @@ void updateAnimations() {
     if (now - lastClockUpdateMs > 1000) {
       drawClockFace();
       lastClockUpdateMs = now;
+    }
+    
+    // LDR-based theme switching (disable I2S ADC temporarily for analogRead)
+    if (now - lastThemeLdrMs > 3000) {
+      lastThemeLdrMs = now;
+      i2s_adc_disable(I2S_NUM_0);
+      cachedLdr = analogRead(LDR_PIN);
+      i2s_adc_enable(I2S_NUM_0);
+      
+      int detectedTheme = ldrToTheme(cachedLdr);
+      if (detectedTheme == pendingTheme) {
+        pendingCount++;
+      } else {
+        pendingTheme = detectedTheme;
+        pendingCount = 1;
+      }
+      if (pendingCount >= LDR_CONFIRM_READS
+          && detectedTheme != activeTheme
+          && (now - lastSwitchMs > THEME_COOLDOWN_MS)) {
+        switchTheme(detectedTheme);
+        lastSwitchMs = now;
+        needRedraw = true;
+      }
     }
     
     if (now > nextCameoTriggerMs) {
@@ -587,6 +686,9 @@ void updateAnimations() {
     }
     
     if (now - speakingStartMs > speakingDuration) {
+      lastBubbleText = "";  // Clear so next text redraws
+      bubbleLineCount = 0;  // Reset pagination
+      textPage = 0;
       setAppState(STATE_IDLE);
     }
   }
@@ -656,7 +758,16 @@ void updateAnimations() {
         ledcWriteTone(0, 0);
         buzzerActive = false;
         Serial.println("[BUZZER] Buzzer stopped after 10 seconds");
+        setAppState(STATE_CLOCK);  // Auto-dismiss alarm after buzzer stops
+        return;
       }
+    }
+    
+    // Hard 30-second timeout as backup
+    if (now - stateTimerMs > 30000) {
+      Serial.println("[ALARM] Auto-dismissed after 30s timeout");
+      setAppState(STATE_CLOCK);
+      return;
     }
   }
 }
@@ -690,7 +801,107 @@ void drawThinkingOverlay() {
   tft.println(text);
 }
 
+// Text pagination: split response into display lines
+#define BUBBLE_LINES_MAX 20
+#define BUBBLE_LINES_PER_PAGE 5
+String bubbleLines[BUBBLE_LINES_MAX];
+int bubbleLineCount = 0;
+
+void paginateText(String text) {
+  bubbleLineCount = 0;
+  text.replace("\r", "");  // normalize
+  
+  int startX = 10;
+  int maxW = 108;
+  
+  // Split on newlines first
+  int searchStart = 0;
+  while (searchStart < text.length() && bubbleLineCount < BUBBLE_LINES_MAX) {
+    int nlIdx = text.indexOf('\n', searchStart);
+    String line;
+    if (nlIdx == -1) {
+      line = text.substring(searchStart);
+      searchStart = text.length();
+    } else {
+      line = text.substring(searchStart, nlIdx);
+      searchStart = nlIdx + 1;
+    }
+    line.trim();
+    if (line.length() == 0) {
+      bubbleLines[bubbleLineCount++] = "";
+      continue;
+    }
+    
+    // Word-wrap this line
+    int wordStart = 0;
+    String currentLine = "";
+    while (wordStart < line.length() && bubbleLineCount < BUBBLE_LINES_MAX) {
+      // Skip spaces
+      while (wordStart < line.length() && line[wordStart] == ' ') wordStart++;
+      if (wordStart >= line.length()) break;
+      
+      // Find word end
+      int wordEnd = wordStart;
+      while (wordEnd < line.length() && line[wordEnd] != ' ') wordEnd++;
+      
+      String word = line.substring(wordStart, wordEnd);
+      
+      if (currentLine.length() == 0) {
+        // First word on line — if it's too long, char-break it
+        if (word.length() * 6 > maxW) {
+          int charsFit = maxW / 6;
+          int pos = 0;
+          while (pos < word.length() && bubbleLineCount < BUBBLE_LINES_MAX) {
+            bubbleLines[bubbleLineCount++] = word.substring(pos, pos + charsFit);
+            pos += charsFit;
+          }
+        } else {
+          currentLine = word;
+        }
+      } else {
+        // Check if word fits on current line
+        int testW = (currentLine.length() + 1 + word.length()) * 6;
+        if (testW > maxW) {
+          // Wrap to next line
+          bubbleLines[bubbleLineCount++] = currentLine;
+          currentLine = "";
+          // Re-check if this word alone is too long
+          if (word.length() * 6 > maxW) {
+            int charsFit = maxW / 6;
+            int pos = 0;
+            while (pos < word.length() && bubbleLineCount < BUBBLE_LINES_MAX) {
+              bubbleLines[bubbleLineCount++] = word.substring(pos, pos + charsFit);
+              pos += charsFit;
+            }
+          } else {
+            currentLine = word;
+          }
+        } else {
+          currentLine += " " + word;
+        }
+      }
+      wordStart = wordEnd;
+    }
+    if (currentLine.length() > 0 && bubbleLineCount < BUBBLE_LINES_MAX) {
+      bubbleLines[bubbleLineCount++] = currentLine;
+    }
+  }
+  
+  textTotalPages = (bubbleLineCount + BUBBLE_LINES_PER_PAGE - 1) / BUBBLE_LINES_PER_PAGE;
+  if (textTotalPages < 1) textTotalPages = 1;
+  textPage = 0;
+}
+
 void drawBubbleText(String text) {
+  // Anti-flicker: skip redraw if text unchanged
+  if (text == lastBubbleText) return;
+  lastBubbleText = text;
+  
+  // Paginate if needed
+  if (bubbleLineCount == 0) {
+    paginateText(text);
+  }
+  
   // Speech Bubble Rectangle
   tft.fillRoundRect(4, 110, 120, 46, 6, COLOR_BUBBLE_BG);
   uint16_t borderCol = text.startsWith("ALARM:") ? TFT_RED : COLOR_BORDER;
@@ -705,51 +916,23 @@ void drawBubbleText(String text) {
   
   int startX = 10;
   int startY = 116;
-  int maxW = 108;
   int lineH = 9;
   
-  int cursorX = startX;
+  int lineIdx = textPage * BUBBLE_LINES_PER_PAGE;
+  int lineEnd = lineIdx + BUBBLE_LINES_PER_PAGE;
+  if (lineEnd > bubbleLineCount) lineEnd = bubbleLineCount;
+  
   int cursorY = startY;
+  for (int i = lineIdx; i < lineEnd && cursorY + 8 <= 110 + 46 - 4; i++) {
+    tft.setCursor(startX, cursorY);
+    tft.print(bubbleLines[i]);
+    cursorY += lineH;
+  }
   
-  int textLen = text.length();
-  int wordStart = 0;
-  
-  while (wordStart < textLen) {
-    while (wordStart < textLen && text[wordStart] == ' ') {
-      wordStart++;
-    }
-    if (wordStart >= textLen) break;
-    
-    int wordEnd = wordStart;
-    while (wordEnd < textLen && text[wordEnd] != ' ') {
-      wordEnd++;
-    }
-    
-    String word = text.substring(wordStart, wordEnd);
-    int wordW = word.length() * 6;
-    
-    if (cursorX + wordW > startX + maxW) {
-      cursorX = startX;
-      cursorY += lineH;
-    }
-    
-    if (cursorY + 8 > 110 + 46 - 4) {
-      tft.setCursor(startX + maxW - 12, cursorY - lineH);
-      tft.print("..");
-      break;
-    }
-    
-    tft.setCursor(cursorX, cursorY);
-    tft.print(word);
-    
-    cursorX += wordW;
-    
-    if (cursorX + 6 <= startX + maxW) {
-      tft.print(" ");
-      cursorX += 6;
-    }
-    
-    wordStart = wordEnd;
+  // Page indicator if multiple pages
+  if (textTotalPages > 1) {
+    tft.setCursor(90, 150);
+    tft.printf("%d/%d", textPage + 1, textTotalPages);
   }
 }
 
@@ -762,6 +945,7 @@ void setup() {
   
   Serial.begin(115200);
   pinMode(BUTTON_PIN, INPUT_PULLUP);
+  pinMode(BOOT_BTN, INPUT_PULLUP);  // BOOT button for text pagination
   pinMode(BUZZER_PIN, OUTPUT);
   digitalWrite(BUZZER_PIN, LOW);
   
@@ -795,7 +979,7 @@ void setup() {
 
   configTime(gmtOffset_sec, daylightOffset_sec, "pool.ntp.org", "time.google.com", "time.nist.gov");
 
-  client.setTimeout(10);
+  client.setTimeout(2);
   setupI2S();
 
   // Create audio timer once — never destroy/recreate it
@@ -879,6 +1063,25 @@ void loop() {
     delay(50); // Debounce
   }
 
+  // BOOT button: paginate text or clear when no more pages
+  if (currentState == STATE_SPEAKING || currentState == STATE_ALARM) {
+    bool bootPressed = (digitalRead(BOOT_BTN) == LOW);
+    if (bootPressed && !lastBootBtnState) {
+      textPage++;
+      if (textPage >= textTotalPages) {
+        // No more pages — clear text and return to clock
+        lastBubbleText = "";
+        bubbleLineCount = 0;
+        textPage = 0;
+        setAppState(STATE_CLOCK);
+      } else {
+        lastBubbleText = "";  // Force redraw with new page
+        needRedraw = true;
+      }
+    }
+    lastBootBtnState = bootPressed;
+  }
+
   // Stream Audio continuously when in clock, idle, listening, or alarm states
   // We use non-blocking I2S reading (timeout 0) so animations remain smooth
   bool shouldStream = (currentState == STATE_CLOCK || currentState == STATE_IDLE || currentState == STATE_LISTENING || currentState == STATE_ALARM);
@@ -929,15 +1132,6 @@ void loop() {
     delay(1);
   }
 
-  // Read LDR only when I2S is NOT streaming, by temporarily releasing the ADC
-  if (!shouldStream && (millis() - lastLdrReadMs > LDR_READ_INTERVAL_MS)) {
-    i2s_adc_disable(I2S_NUM_0);
-    int ldrValue = analogRead(LDR_PIN); // 0-4095
-    i2s_adc_enable(I2S_NUM_0);
-    client.print("LDR:" + String(ldrValue) + "\n");
-    lastLdrReadMs = millis();
-  }
-
   // Check for Server Commands and LLM responses
   if (client.available()) {
     String response = client.readStringUntil('\n');
@@ -962,19 +1156,24 @@ void loop() {
         }
       }
       else if (response.startsWith("CMD:WAKE") || response == "UI_STATE:LISTENING") {
+        serverDuration = 0;
         setAppState(STATE_WAVING_INTRO);
       }
       else if (response == "UI_STATE:GREETING") {
+        serverDuration = 0;
         greetingMode = true;
         setAppState(STATE_WAVING_INTRO);
       }
       else if (response.startsWith("CMD:THINKING") || response == "UI_STATE:THINKING") {
+        serverDuration = 0;
         setAppState(STATE_THINKING);
       }
       else if (response == "UI_STATE:IDLE") {
+        serverDuration = 0;
         setAppState(STATE_CLOCK);
       }
       else if (response.startsWith("UI_ALARM:")) {
+        serverDuration = 0;
         String alarmName = response.substring(9);
         alarmName.trim();
         currentResponseText = "ALARM: " + alarmName;
@@ -985,6 +1184,9 @@ void loop() {
         setAppState(STATE_ALARM);
         ledcWriteTone(0, 1000); // Immediate feedback
         Serial.println("[BUZZER] Alarm received, buzzer activated on D13");
+      }
+      else if (response.startsWith("DURATION:")) {
+        serverDuration = (unsigned long)(response.substring(9).toFloat() * 1000.0f);
       }
       else if (response.startsWith("UI_LIST:")) {
         String listContent = response.substring(8);
@@ -1005,7 +1207,11 @@ void loop() {
         }
         currentResponseText = cleanMsg;
         speakingStartMs = millis();
-        speakingDuration = max(5000UL, (unsigned long)(cleanMsg.length() * 100));
+        speakingDuration = serverDuration > 0 ? serverDuration : max(5000UL, (unsigned long)(cleanMsg.length() * 100));
+        serverDuration = 0;
+        lastBubbleText = "";  // Force bubble redraw
+        bubbleLineCount = 0;  // Reset pagination for new text
+        textPage = 0;
         setAppState(STATE_SPEAKING);
       }
     }
