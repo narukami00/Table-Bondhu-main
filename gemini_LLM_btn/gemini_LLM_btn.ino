@@ -198,6 +198,12 @@ unsigned long cameoFrameStartMs = 0;
 int waveFrame = 0;
 unsigned long waveFrameStartMs = 0;
 int waveCycleCount = 0;
+
+// Text pagination globals (must be before updateAnimations)
+#define BUBBLE_LINES_MAX 20
+#define BUBBLE_LINES_PER_PAGE 5
+String bubbleLines[BUBBLE_LINES_MAX];
+int bubbleLineCount = 0;
 bool greetingMode = false;  // True when wave was triggered by greeting (skip LISTENING on finish)
 
 // Redraw control
@@ -822,11 +828,6 @@ void drawThinkingOverlay() {
 }
 
 // Text pagination: split response into display lines
-#define BUBBLE_LINES_MAX 20
-#define BUBBLE_LINES_PER_PAGE 5
-String bubbleLines[BUBBLE_LINES_MAX];
-int bubbleLineCount = 0;
-
 void paginateText(String text) {
   bubbleLineCount = 0;
   text.replace("\r", "");  // normalize
@@ -1034,7 +1035,7 @@ void playAudioStart(const uint8_t* buf, uint32_t len) {
   playAudioStop();
   audioBuf = (uint8_t *)malloc(len);
   if (!audioBuf) return;
-  memcpy(audioBuf, buf, len);
+  memcpy((void*)audioBuf, buf, len);
 
   audioPlayLen = len;
   audioPlayIdx = 0;
@@ -1049,7 +1050,7 @@ void playAudioStop() {
   audioPlaying = false;
   timerAlarmDisable(audioTimer);
   if (audioBuf) {
-    free(audioBuf);
+    free((void*)audioBuf);
     audioBuf = NULL;
   }
   dac_output_disable(DAC_CHANNEL_1);
