@@ -180,6 +180,7 @@ unsigned long serverDuration = 0;  // Server-provided audio duration override
 int textPage = 0;           // Current page of text being displayed
 int textTotalPages = 0;     // Total pages for current text
 bool lastBootBtnState = false; // Edge detection for BOOT button
+bool lastButtonState = false;  // Edge detection for main button
 int mouthFrame = 0;
 int blinkFrame = 0;
 bool isBlinking = false;
@@ -427,7 +428,7 @@ void drawClockFace() {
     tft.drawRect(2, 2, 124, 156, COLOR_BORDER);
     tft.drawRect(4, 4, 120, 152, COLOR_BG);
 
-    tft.setTextColor(TFT_WHITE, COLOR_BG);
+    tft.setTextColor(COLOR_ACCENT, COLOR_BG);
     tft.setTextSize(1);
     tft.setCursor(24, 55);
     tft.println("Syncing Time...");
@@ -468,7 +469,7 @@ void drawClockFace() {
   strftime(timeStr, sizeof(timeStr), "%I:%M", &timeinfo);
   const char* ampm = (timeinfo.tm_hour >= 12) ? "PM" : "AM";
   
-  tft.setTextColor(TFT_WHITE, COLOR_BG);
+  tft.setTextColor(COLOR_ACCENT, COLOR_BG);
   tft.setTextSize(3);
   int timeWidth = strlen(timeStr) * 18;
   tft.setCursor((128 - timeWidth) / 2, 55);
@@ -745,7 +746,15 @@ void updateAnimations() {
     needRedraw = false;
   }
 
-  // 11. Alarm flashing state update
+  // 11. Safety timeout: recover from stuck LISTENING/THINKING
+  if ((currentState == STATE_LISTENING || currentState == STATE_THINKING) &&
+      (now - stateTimerMs > 15000)) {
+    Serial.printf("[TIMEOUT] %s stuck for 15s, returning to clock\n",
+                  currentState == STATE_LISTENING ? "LISTENING" : "THINKING");
+    setAppState(STATE_CLOCK);
+  }
+
+  // 12. Alarm flashing state update
   static unsigned long lastAlarmFlashMs = 0;
   if (currentState == STATE_ALARM) {
     if (now - lastAlarmFlashMs > 250) {
@@ -1059,20 +1068,22 @@ void loop() {
     setAppState(STATE_CLOCK);
   }
 
-  // Check Button State for manual wake up
+  // Check Button State for manual wake up (edge detection)
   bool buttonPressed = (digitalRead(BUTTON_PIN) == LOW);
 
-  if (buttonPressed && !isRecording) {
+  if (buttonPressed && !lastButtonState) {
+    // Button just pressed — clear greetingMode, start wave
+    greetingMode = false;
     isRecording = true;
     client.print("CMD:WOKE\n");
     setAppState(STATE_WAVING_INTRO);
-    delay(50); // Debounce
   } 
-  else if (!buttonPressed && isRecording) {
+  else if (!buttonPressed && lastButtonState) {
+    // Button just released — end recording
     isRecording = false;
     client.print("___END___");
-    delay(50); // Debounce
   }
+  lastButtonState = buttonPressed;
 
   // BOOT button: paginate text or clear when no more pages
   if (currentState == STATE_SPEAKING || currentState == STATE_ALARM) {
