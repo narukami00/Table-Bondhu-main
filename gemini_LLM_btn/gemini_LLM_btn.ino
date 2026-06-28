@@ -7,7 +7,6 @@
 #include "soc/soc.h"
 #include "soc/rtc_cntl_reg.h"
 #include "config.h"
-#include "images.h"
 
 #define BUTTON_PIN 14 // Tactile Button (GND + D14)
 #define BOOT_BTN 0    // Built-in BOOT button for text pagination
@@ -40,6 +39,8 @@
   #define DEFAULT_STATUS TFT_GREEN
   #define ASSET_BG 0x911C
 #endif
+
+#include "images.h"
 
 // Runtime color variables (changed by theme switching)
 uint16_t COLOR_BG = DEFAULT_BG;
@@ -86,7 +87,8 @@ enum AppState {
   STATE_THINKING,
   STATE_SPEAKING,
   STATE_WAVING_OUTRO,
-  STATE_ALARM
+  STATE_ALARM,
+  STATE_REMINDERS
 };
 
 int ldrToTheme(int ldr) {
