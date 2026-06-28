@@ -1,0 +1,7 @@
+{
+  "recommendations": [
+    "vsciot-devkit.vscode-arduino",
+    "ms-vscode.cpptools",
+    "ms-python.python"
+  ]
+}
