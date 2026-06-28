@@ -108,10 +108,11 @@ void switchTheme(int idx) {
   Serial.printf("[THEME] Switched to theme %d (LDR=%d)\n", idx, cachedLdr);
 }
 
-// Buffer for pushThemedImage (sprite background replacement)
-static uint16_t themedBuf[128 * 128];
+// Buffer for pushThemedImage (sprite background replacement) — heap-allocated in setup()
+static uint16_t *themedBuf = NULL;
 
 void pushThemedImage(TFT_eSprite &spr, int x, int y, int w, int h, const uint16_t *data) {
+  if (!themedBuf) return;  // safety: not yet allocated
   int total = w * h;
   memcpy(themedBuf, data, total * sizeof(uint16_t));
   for (int i = 0; i < total; i++) {
@@ -992,6 +993,13 @@ void setup() {
   tft.setTextSize(1);
   tft.setCursor(10, 10);
   tft.println("Connecting...");
+
+  // Allocate themedBuf on heap (32KB would overflow static RAM with sprites)
+  themedBuf = (uint16_t *)malloc(128 * 128 * sizeof(uint16_t));
+  if (!themedBuf) {
+    Serial.println("[FATAL] themedBuf alloc failed");
+    while(1) delay(1000);
+  }
 
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
   while (WiFi.status() != WL_CONNECTED) {
