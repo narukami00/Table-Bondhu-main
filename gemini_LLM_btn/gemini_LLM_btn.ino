@@ -71,6 +71,24 @@ unsigned long lastSwitchMs = 0;
 unsigned long lastThemeLdrMs = 0;
 int cachedLdr = 2048;
 
+// TFT and sprites — must be before any function that uses them
+TFT_eSPI tft = TFT_eSPI();
+TFT_eSprite faceSprite = TFT_eSprite(&tft);
+TFT_eSprite cameoSprite = TFT_eSprite(&tft);
+WiFiClient client;
+
+enum AppState {
+  STATE_CLOCK,
+  STATE_CAMEO,
+  STATE_WAVING_INTRO,
+  STATE_IDLE,
+  STATE_LISTENING,
+  STATE_THINKING,
+  STATE_SPEAKING,
+  STATE_WAVING_OUTRO,
+  STATE_ALARM
+};
+
 int ldrToTheme(int ldr) {
   if (ldr < 300) return 0;       // Night
   if (ldr < 1000) return 1;      // Autumn
@@ -116,10 +134,6 @@ static uint16_t themedBuf[128 * 128];
   #define CAMEO_FRAME_COUNT 5
 #endif
 
-TFT_eSPI tft = TFT_eSPI();
-TFT_eSprite faceSprite = TFT_eSprite(&tft);
-TFT_eSprite cameoSprite = TFT_eSprite(&tft);
-WiFiClient client;
 bool isRecording = false;
 bool alarmFlashState = false;
 
@@ -130,18 +144,6 @@ unsigned long buzzerStartMs = 0;
 // Audio Filter Variables
 float dc_filter_y = 0;
 float dc_filter_x = 0;
-
-enum AppState {
-  STATE_CLOCK,
-  STATE_CAMEO,
-  STATE_WAVING_INTRO,
-  STATE_IDLE,
-  STATE_LISTENING,
-  STATE_THINKING,
-  STATE_SPEAKING,
-  STATE_WAVING_OUTRO,
-  STATE_ALARM
-};
 
 AppState currentState = STATE_CLOCK;
 
@@ -992,7 +994,7 @@ void setup() {
 }
 
 // --- Non-blocking audio playback via hardware timer + DAC (GPIO 25) ---
-static uint8_t *audioBuf = NULL;
+static volatile uint8_t *audioBuf = NULL;
 static volatile uint32_t audioPlayLen = 0;
 static volatile uint32_t audioPlayIdx = 0;
 static volatile bool audioPlaying = false;
