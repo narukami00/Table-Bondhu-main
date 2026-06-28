@@ -138,5 +138,12 @@
     "display_time": "in 10 seconds",
     "fired": true,
     "created": "2026-06-28T18:42:47.515943"
+  },
+  {
+    "task": "Reminder",
+    "trigger_time": "2026-06-28T22:05:27.465380",
+    "display_time": "in 10 seconds",
+    "fired": true,
+    "created": "2026-06-28T22:05:17.465993"
   }
 ]

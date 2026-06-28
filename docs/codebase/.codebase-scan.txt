@@ -1,0 +1,296 @@
+
+=== DIRECTORY TREE (max depth 3, source files only) ===
+.gitignore
+.vscode
+.vscode\arduino.json
+.vscode\c_cpp_properties.json
+.vscode\extensions.json
+agentic_companion.py
+analyze_recordings.py
+Arduino
+Arduino\config.h
+Arduino\images
+Arduino\images\images.h
+Arduino\images\README.md
+Arduino\sketches
+Arduino\sketches\gemini_button
+Arduino\sketches\gemini_button\gemini_LLM_btn.ino
+Arduino\sketches\live_rec
+Arduino\sketches\live_rec\live_rec.ino
+Arduino\sketches\save_recording
+Arduino\sketches\save_recording\save_arduino.ino
+Arduino\utils
+Arduino\utils\display.h
+Arduino\utils\i2s_setup.h
+Arduino\utils\wifi.h
+assets
+assets\girl
+assets\girl\eyes_closed_mouth_open.jpg
+assets\girl\eyes_closed_smile.jpg
+assets\girl\eyes_half_smile.jpg
+assets\girl\eyes_open_mouth_closed.jpg
+assets\girl\eyes_open_mouth_open_100.jpg
+assets\girl\eyes_open_mouth_open_20.jpg
+assets\girl\eyes_open_mouth_open_60.jpg
+assets\girl\eyes_open_smile.jpg
+assets\girl\head_1.jpg
+assets\girl\head_2.jpg
+assets\girl\head_3.jpg
+assets\girl\wave_1.png
+assets\girl\wave_2.jpeg
+assets\Pikachu
+assets\Pikachu\eyes_closed_mouth_open.png
+assets\Pikachu\eyes_closed_smile.png
+assets\Pikachu\eyes_half_smile.png
+assets\Pikachu\eyes_open_mouth_closed.png
+assets\Pikachu\eyes_open_mouth_open_100.png
+assets\Pikachu\eyes_open_mouth_open_20.png
+assets\Pikachu\eyes_open_mouth_open_60.png
+assets\Pikachu\peek_1.png
+assets\Pikachu\peek_2.png
+assets\Pikachu\peek_3.png
+assets\Pikachu\peek_4.png
+assets\Pikachu\wave_1.png
+assets\Pikachu\wave_2.png
+assets\Pikachu\wave_3.png
+check_api.py
+COMPANION_GUIDE.md
+docs
+docs\API.md
+docs\codebase
+docs\codebase\.codebase-scan.txt
+docs\README.md
+docs\STRUCTURE.md
+gemini_LLM.py
+gemini_LLM2.py
+gemini_LLM_btn
+gemini_LLM_btn\config.h
+gemini_LLM_btn\gemini_LLM_btn.ino
+gemini_LLM_btn\images.h
+gemini_LLM_Button.py
+LICENSE
+live_rec
+live_rec\config.h
+live_rec\live_rec.ino
+live_transcribe.py
+Python
+Python\.gitignore
+Python\audio
+Python\audio\__init__.py
+Python\audio\processor.py
+Python\audio\transcriber.py
+Python\config
+Python\config\__init__.py
+Python\config\settings.py
+Python\llm
+Python\llm\__init__.py
+Python\llm\chat_memory.py
+Python\llm\gemini_client.py
+Python\main.py
+Python\recordings
+Python\recordings\.gitkeep
+Python\server
+Python\server\__init__.py
+Python\server\handlers.py
+Python\server\tcp_server.py
+Python\utils
+Python\utils\__init__.py
+Python\utils\helpers.py
+Python\utils\logger.py
+recordings
+recordings\audio_20260622_235530.wav
+recordings\audio_20260622_235545.wav
+recordings\audio_20260622_235607.wav
+recordings\audio_20260622_235631.wav
+recordings\audio_20260622_235652.wav
+recordings\audio_20260622_235712.wav
+recordings\audio_20260622_235730.wav
+recordings\audio_20260623_000947.wav
+recordings\audio_20260623_001500.wav
+recordings\audio_20260623_001511.wav
+recordings\audio_20260623_001619.wav
+recordings\audio_20260623_001634.wav
+recordings\audio_20260623_001658.wav
+recordings\audio_20260623_001712.wav
+recordings\audio_20260623_001725.wav
+recordings\audio_20260623_003219.wav
+recordings\audio_20260623_003343.wav
+recordings\audio_20260623_003516.wav
+recordings\audio_20260623_003731.wav
+recordings\audio_20260623_003742.wav
+recordings\audio_20260623_004422.wav
+recordings\audio_20260623_004434.wav
+recordings\audio_20260623_004750.wav
+recordings\audio_20260623_004851.wav
+recordings\audio_20260623_014546.wav
+recordings\audio_20260623_014932.wav
+recordings\audio_20260623_014941.wav
+recordings\audio_20260623_014954.wav
+recordings\audio_20260623_015353.wav
+recordings\audio_20260623_015435.wav
+recordings\audio_20260623_020645.wav
+recordings\audio_20260624_014237.wav
+recordings\audio_20260624_014253.wav
+recordings\audio_20260624_014320.wav
+recordings_analysis
+recordings_analysis\rec_20260626_122024.wav
+recordings_analysis\rec_20260626_122032.wav
+recordings_analysis\rec_20260626_122038.wav
+recordings_analysis\rec_20260626_122442.wav
+recordings_analysis\rec_20260626_122454.wav
+recordings_analysis\rec_20260626_122538.wav
+recordings_analysis\rec_20260626_122601.wav
+recordings_analysis\rec_20260626_122620.wav
+recordings_analysis\rec_20260626_122635.wav
+recordings_analysis\rec_20260626_122650.wav
+recordings_analysis\rec_20260626_122712.wav
+recordings_analysis\rec_20260626_122721.wav
+recordings_analysis\rec_20260626_123954.wav
+recordings_analysis\rec_20260626_124009.wav
+recordings_analysis\rec_20260626_124026.wav
+recordings_analysis\rec_20260626_124049.wav
+recordings_analysis\rec_20260626_124056.wav
+recordings_analysis\rec_20260626_124110.wav
+recordings_analysis\rec_20260626_124127.wav
+recordings_analysis\rec_20260626_124146.wav
+recordings_analysis\rec_20260626_124154.wav
+recordings_analysis\rec_20260627_092721.wav
+recordings_analysis\rec_20260627_092732.wav
+recordings_analysis\rec_20260627_092738.wav
+recordings_analysis\rec_20260627_093319.wav
+recordings_analysis\rec_20260627_093329.wav
+recordings_analysis\rec_20260627_093341.wav
+recordings_analysis\rec_20260627_094117.wav
+recordings_analysis\rec_20260627_094143.wav
+recordings_analysis\rec_20260627_100054.wav
+recordings_analysis\rec_20260627_100106.wav
+recordings_analysis\rec_20260627_110102.wav
+recordings_analysis\rec_20260627_110115.wav
+recordings_analysis\rec_20260627_110156.wav
+recordings_analysis\rec_20260627_110208.wav
+recordings_analysis\rec_20260627_110221.wav
+recordings_analysis\rec_20260627_110236.wav
+recordings_analysis\rec_20260627_110404.wav
+recordings_analysis\rec_20260627_111122.wav
+recordings_analysis\rec_20260627_111128.wav
+recordings_analysis\rec_20260627_111355.wav
+recordings_analysis\rec_20260627_111402.wav
+recordings_analysis\rec_20260627_111959.wav
+recordings_analysis\rec_20260627_112016.wav
+recordings_analysis\rec_20260627_112057.wav
+recordings_analysis\rec_20260627_112329.wav
+recordings_analysis\rec_20260627_112349.wav
+recordings_analysis\rec_20260627_112358.wav
+recordings_analysis\rec_20260627_112431.wav
+recordings_analysis\rec_20260627_112711.wav
+recordings_analysis\rec_20260627_112722.wav
+recordings_analysis\rec_20260627_113041.wav
+recordings_analysis\rec_20260627_113126.wav
+recordings_analysis\rec_20260627_113227.wav
+recordings_analysis\rec_20260627_113454.wav
+recordings_analysis\rec_20260627_113549.wav
+recordings_analysis\rec_20260627_113649.wav
+recordings_analysis\rec_20260627_113914.wav
+recordings_analysis\rec_20260627_113927.wav
+recordings_analysis\rec_20260627_113942.wav
+recordings_analysis\rec_20260627_113955.wav
+recordings_analysis\rec_20260627_114003.wav
+recordings_analysis\rec_20260627_114020.wav
+recordings_analysis\rec_20260627_114310.wav
+recordings_analysis\rec_20260627_114358.wav
+recordings_analysis\rec_20260627_114529.wav
+recordings_analysis\rec_20260627_114844.wav
+
+=== STACK DETECTION (manifest files) ===
+
+--- requirements.txt ---
+python-dotenv
+google-generativeai
+onnx-asr
+SpeechRecognition
+numpy
+
+
+=== ENTRY POINTS ===
+No common entry points found. Check 'main' or 'scripts.start' in manifest files above.
+
+=== LINTING AND FORMATTING CONFIG ===
+No linting or formatting config files found in project root.
+
+=== ENVIRONMENT VARIABLE TEMPLATES ===
+No .env.example or .env.template found. Identify required environment variables by searching the code and config for environment variable reads.
+
+=== TODO / FIXME / HACK (production code only, test dirs excluded) ===
+None found.
+
+=== GIT RECENT COMMITS (last 20) ===
+0e44c25 fix: ___END___ missing newline (stuck at listening), restore LDR TCP send (lost during refactor)
+b45d608 fix boot crash: conditional compilation for images.h (halves binary), re-add STATE_REMINDERS
+f3de5f6 fix boot crash: move themedBuf[32KB] from static RAM to heap malloc in setup()
+880a4db fix 3 bugs: playAudioStop on state transitions, serverDuration leak in UI_LIST, TCP framing with recv_buffer
+f7cb11c fix compile errors: move bubbleLineCount globals before updateAnimations, cast volatile for memcpy/free
+bc000c8 fix 5 gaps: COLOR_ACCENT for clock/syncing, 15s LISTENING/THINKING timeout, main button edge detection, clear greetingMode on press
+ab2704a add pushThemedImage: replace ASSET_BG with COLOR_BG for dynamic sprite backgrounds
+5c134b1 fix compile errors: move enum/tft before functions, make audioBuf volatile
+70085db fix all 5 issues: runtime colors, 12h clock+AM/PM, alarm auto-dismiss, text pagination+BOOT btn, LDR theme switching, serverDuration
+3553cfe baseline: current state before fixes
+
+=== HIGH-CHURN FILES (last 90 days, top 20) ===
+  10 gemini_LLM_btn/gemini_LLM_btn.ino
+   2 gemini_LLM_btn/images.h
+   2 agentic_companion.py
+   1 .gitignore
+   1 .vscode/arduino.json
+   1 .vscode/c_cpp_properties.json
+   1 .vscode/extensions.json
+   1 Arduino/config.h
+   1 Arduino/images/README.md
+   1 Arduino/images/images.h
+   1 Arduino/sketches/gemini_button/gemini_LLM_btn.ino
+   1 Arduino/sketches/live_rec/live_rec.ino
+   1 Arduino/sketches/save_recording/save_arduino.ino
+   1 Arduino/utils/display.h
+   1 Arduino/utils/i2s_setup.h
+   1 Arduino/utils/wifi.h
+   1 COMPANION_GUIDE.md
+   1 LICENSE
+   1 Python/.gitignore
+   1 Python/audio/__init__.py
+
+=== MONOREPO SIGNALS ===
+No monorepo signals detected.
+
+=== CODE METRICS ===
+Total files scanned: 222
+Total lines of code: 2454
+
+Files by language:
+  Other: 190
+  Python: 24
+  C Header: 8
+
+Top 10 largest files:
+gemini_LLM_btn\images.h: 3413.2KB
+assets\Pikachu\eyes_open_mouth_open_60.png: 1090.0KB
+assets\girl\wave_1.png: 789.8KB
+assets\Pikachu\eyes_open_mouth_open_20.png: 759.1KB
+assets\Pikachu\peek_4.png: 746.2KB
+Screenshot 2026-05-28 020124.png: 734.7KB
+assets\Pikachu\eyes_closed_mouth_open.png: 684.1KB
+assets\Pikachu\wave_2.png: 680.0KB
+recordings_analysis\rec_20260627_142457.wav: 557.5KB
+recordings_analysis\rec_20260627_093341.wav: 550.1KB
+
+=== CI/CD PIPELINES ===
+No CI/CD pipelines detected.
+
+=== CONTAINERS & ORCHESTRATION ===
+No containerization configs detected.
+
+=== SECURITY & COMPLIANCE ===
+No security configs detected.
+
+=== PERFORMANCE & TESTING ===
+No performance testing configs detected.
+
+=== SCAN COMPLETE ===

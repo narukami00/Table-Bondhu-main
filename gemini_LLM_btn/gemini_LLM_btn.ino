@@ -551,9 +551,11 @@ void updateAnimations() {
     // LDR-based theme switching (disable I2S ADC temporarily for analogRead)
     if (now - lastThemeLdrMs > 3000) {
       lastThemeLdrMs = now;
+      i2s_stop(I2S_NUM_0);
       i2s_adc_disable(I2S_NUM_0);
       cachedLdr = analogRead(LDR_PIN);
       i2s_adc_enable(I2S_NUM_0);
+      i2s_start(I2S_NUM_0);
       client.print("LDR:" + String(cachedLdr) + "\n");
       
       int detectedTheme = ldrToTheme(cachedLdr);
@@ -762,8 +764,8 @@ void updateAnimations() {
 
   // 11. Safety timeout: recover from stuck LISTENING/THINKING
   if ((currentState == STATE_LISTENING || currentState == STATE_THINKING) &&
-      (now - stateTimerMs > 15000)) {
-    Serial.printf("[TIMEOUT] %s stuck for 15s, returning to clock\n",
+      (now - stateTimerMs > 30000)) {
+    Serial.printf("[TIMEOUT] %s stuck for 30s, returning to clock\n",
                   currentState == STATE_LISTENING ? "LISTENING" : "THINKING");
     setAppState(STATE_CLOCK);
   }

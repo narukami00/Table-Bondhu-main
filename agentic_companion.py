@@ -574,6 +574,21 @@ class VoiceAgentHandler:
             except Exception:
                 pass
             
+    def _extract_command(self, buf, marker):
+        """Find a text command (e.g. CMD:WOKE\\n) embedded in binary audio stream.
+        Returns (before_bytes, command_str, after_bytes) or None if not found."""
+        pos = buf.find(marker)
+        if pos < 0:
+            return None
+        # Find the newline that terminates this command
+        nl_pos = buf.find(b"\n", pos)
+        if nl_pos < 0:
+            return None  # incomplete command, wait for more data
+        before = buf[:pos]
+        cmd = buf[pos:nl_pos]  # exclude the \n itself
+        after = buf[nl_pos+1:]
+        return (before, cmd, after)
+
     def run(self):
         global active_conn
         active_conn = self.conn
@@ -596,21 +611,30 @@ class VoiceAgentHandler:
                 if not data:
                     break
                 
-                # Accumulate into recv_buffer for framing
+                # Accumulate into recv_buffer
                 self.recv_buffer.extend(data)
                 
-                # Process complete newline-delimited commands
-                while True:
-                    nl_pos = self.recv_buffer.find(b"\n")
-                    if nl_pos < 0:
-                        break  # no complete line yet
+                # Extract text commands embedded in the binary audio stream.
+                # Commands are: CMD:WOKE\n, ___END___\n, LDR:xxx\n
+                # Everything else is raw PCM audio bytes.
+                #
+                # IMPORTANT: Raw audio is binary — it contains random 0x0A bytes.
+                # We must NOT split on \n generically. We only look for known
+                # command prefixes as byte markers.
+                
+                audio_chunks = []  # collect audio byte segments
+                
+                processing = True
+                while processing:
+                    processing = False
                     
-                    line = bytes(self.recv_buffer[:nl_pos])
-                    self.recv_buffer = self.recv_buffer[nl_pos+1:]
-                    
-                    # CMD:WOKE
-                    if line.startswith(b"CMD:"):
-                        cmd = line.decode('utf-8', errors='ignore').strip()
+                    # Try to extract CMD: command
+                    result = self._extract_command(self.recv_buffer, b"CMD:")
+                    if result:
+                        before, cmd_bytes, after = result
+                        if before:
+                            audio_chunks.append(bytes(before))
+                        cmd = cmd_bytes.decode('utf-8', errors='ignore').strip()
                         if cmd == "CMD:WOKE":
                             self.is_awake = True
                             self.speech_buffer = bytearray()
@@ -619,55 +643,71 @@ class VoiceAgentHandler:
                             self.audio_bytes_received = 0
                             self.first_audio_time = 0
                             print("\n[*] Button pressed: recording started...")
+                        self.recv_buffer = bytearray(after)
+                        processing = True
                         continue
                     
-                    # ___END___
-                    if line == b"___END___":
+                    # Try to extract ___END___
+                    result = self._extract_command(self.recv_buffer, b"___END___")
+                    if result:
+                        before, cmd_bytes, after = result
+                        if before:
+                            audio_chunks.append(bytes(before))
                         if self.is_awake:
                             print("[*] Button released: recording stopped")
                             duration = time.time() - self.recording_start_time
                             self.process_speech(self.speech_buffer, duration)
                             self.speech_buffer = bytearray()
                             self.is_awake = False
+                        self.recv_buffer = bytearray(after)
+                        processing = True
                         continue
                     
-                    # LDR:xxx
-                    if line.startswith(b"LDR:"):
+                    # Try to extract LDR: readings
+                    result = self._extract_command(self.recv_buffer, b"LDR:")
+                    if result:
+                        before, cmd_bytes, after = result
+                        if before:
+                            audio_chunks.append(bytes(before))
                         try:
-                            ldr_str = line.decode('utf-8', errors='ignore').strip()
+                            ldr_str = cmd_bytes.decode('utf-8', errors='ignore').strip()
                             ldr_value = int(ldr_str.split(":")[1])
                             print(f"[*] LDR: {ldr_value} (0-4095)")
                         except Exception:
                             pass
+                        self.recv_buffer = bytearray(after)
+                        processing = True
                         continue
                 
-                # Anything left in recv_buffer that's not a partial command goes to audio
-                if self.recv_buffer:
-                    # Check for partial ___END___ at tail (might span next recv)
-                    if self.recv_buffer.endswith(b"___END___") or self.recv_buffer.endswith(b"___END"):
-                        pass  # wait for more data to complete the delimiter
-                    else:
-                        # Feed to keyword buffer (strip LDR lines)
-                        clean = bytes(self.recv_buffer)
-                        self.recv_buffer = bytearray()
-                        while True:
-                            ldr_start = clean.find(b"LDR:")
-                            if ldr_start < 0:
-                                break
-                            ldr_end = clean.find(b"\n", ldr_start)
-                            if ldr_end < 0:
-                                clean = clean[:ldr_start]
-                                break
-                            clean = clean[:ldr_start] + clean[ldr_end+1:]
-                        if clean:
-                            self.keyword_buffer.extend(clean)
+                # Check if recv_buffer has a partial command marker at the tail
+                # that might be completed by the next recv() call
+                tail = bytes(self.recv_buffer)
+                partial_markers = [b"CMD:", b"___END___", b"LDR:"]
+                safe_len = len(tail)
+                for marker in partial_markers:
+                    # Check if the tail ends with any prefix of a marker
+                    for prefix_len in range(1, len(marker)):
+                        if tail.endswith(marker[:prefix_len]):
+                            safe_len = min(safe_len, len(tail) - prefix_len)
+                            break
+                
+                # Everything before the potential partial marker is audio data
+                if safe_len > 0:
+                    audio_data = bytes(self.recv_buffer[:safe_len])
+                    self.recv_buffer = self.recv_buffer[safe_len:]
+                    audio_chunks.append(audio_data)
+                
+                # Feed all extracted audio to keyword buffer and speech buffer
+                for chunk in audio_chunks:
+                    if chunk:
+                        self.keyword_buffer.extend(chunk)
                         
-                        # Feed to speech buffer if awake
                         if self.is_awake and time.time() >= self.speech_ready_time:
                             if self.first_audio_time == 0:
                                 self.first_audio_time = time.time()
-                            self.audio_bytes_received += len(clean)
-                            self.speech_buffer.extend(clean)
+                            self.audio_bytes_received += len(chunk)
+                            self.speech_buffer.extend(chunk)
+                            
             except socket.timeout:
                 print(f"[Timeout] No data from {self.addr} for 30s, disconnecting")
                 break
