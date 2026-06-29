@@ -30,7 +30,7 @@ LM_STUDIO_URL = "http://127.0.0.1:1234/v1/chat/completions"
 MODEL_NAME = "google/gemma-4-e4b"
 REMINDERS_FILE = "reminders.json"
 RECORDINGS_DIR = "recordings_analysis"
-COMMAND_TRIGGERS = ["reminder", "reminders", "hi", "hello", "hey"]
+COMMAND_TRIGGERS = ["reminder", "reminders", "hi", "hello", "hey", "yo"]
 QUESTION_WORDS = ["what", "how", "why", "can you", "is", "do", "where",
                    "when", "who", "which", "could", "would", "should",
                    "tell me", "explain"]
@@ -48,10 +48,10 @@ send_lock = threading.Lock()  # Prevents interleaved sends from multiple threads
 chat_lock = threading.Lock()  # Protects chat_session across threads
 
 # --- LLM SYSTEM INSTRUCTION FOR AGENTIC COMMANDS ---
-SYSTEM_INSTRUCTION = """You are a voice assistant built into a tiny microcontroller. 
+SYSTEM_INSTRUCTION = """You are a helpful and cute desk assistant built into a tiny microcontroller. 
 Your answers are displayed on a 160x128 pixel screen. 
 You MUST be extremely concise. Keep every answer under 15 words. 
-Do not use markdown formatting.
+Do not use markdown formatting. You MUST NOT use any emojis or emoticons in your responses.
 
 You have the ability to manage reminders and alarms.
 - EXPLICIT TIME (absolute): [CMD:ADD_REMINDER|task|ABS|time]
@@ -80,7 +80,11 @@ class LocalChatSession:
             self.history.append({"role": "user", "content": user_text})
             messages = []
             if self.system_instruction:
-                messages.append({"role": "system", "content": self.system_instruction})
+                # Inject current date and time dynamically
+                now = datetime.datetime.now()
+                time_ctx = now.strftime("%A, %d %B %Y %I:%M %p")
+                sys_prompt = f"{self.system_instruction}\n\n[CONTEXT] The current time and date is: {time_ctx}. Use this context to answer questions about the current time or date concisely."
+                messages.append({"role": "system", "content": sys_prompt})
             messages.extend(self.history)
             
             data = {
@@ -142,39 +146,58 @@ def stop_active_alarm():
         print(f"Failed to stop alarm sound: {e}")
 
 # --- TTS (Text-to-Speech) via Google TTS ---
-def text_to_speech_pcm(text):
-    """Convert text to 8-bit unsigned PCM at 8kHz using Google TTS"""
+def play_speech_on_laptop(text):
+    """Play the synthesized speech on the laptop speakers using winsound, modulated to sound like Pikachu"""
     try:
+        import winsound
+        # Generate speech audio
         tts = gTTS(text=text, lang='en', slow=False)
         mp3_buf = io.BytesIO()
         tts.write_to_fp(mp3_buf)
         mp3_buf.seek(0)
+        
+        # Load the audio segment
         sound = AudioSegment.from_mp3(mp3_buf)
-        sound = sound.set_frame_rate(8000).set_channels(1).set_sample_width(1)  # 8kHz, mono, 8-bit unsigned
-        return sound.raw_data
+        
+        # --- PIKACHU VOICE EFFECT (PITCH & SPEED SHIFT) ---
+        # Speed up and pitch up by 40% (creates a cute, high-pitched tone)
+        new_sample_rate = int(sound.frame_rate * 1.40)
+        pitched_sound = sound._spawn(sound.raw_data, overrides={'frame_rate': new_sample_rate})
+        # Resample to standard 44.1kHz rate so the audio interface plays it back correctly
+        pitched_sound = pitched_sound.set_frame_rate(44100)
+        
+        temp_wav = "temp_tts_playback.wav"
+        pitched_sound.export(temp_wav, format="wav")
+        
+        # Calculate new duration
+        duration_sec = len(pitched_sound.raw_data) / (pitched_sound.frame_rate * pitched_sound.channels * pitched_sound.sample_width)
+        
+        # Play asynchronously using winsound
+        print(f"[TTS Pikachu] Playing asynchronously: '{text}' ({duration_sec:.1f}s)")
+        winsound.PlaySound(temp_wav, winsound.SND_FILENAME | winsound.SND_ASYNC)
+        return duration_sec
     except Exception as e:
-        print(f"[TTS Error] {e}")
+        print(f"[TTS Pikachu Error] {e}")
         return None
 
 def speak_on_esp32(conn, text, header=None):
-    """Generate TTS and send to ESP32 for playback through speaker.
-    header: optional bytes to send atomically before DURATION/AUDIO (e.g. UI_MSG).
+    """Generate TTS and play on laptop while sending duration sync back to the ESP32.
+    header: optional bytes to send atomically before DURATION (e.g. UI_MSG).
     """
-    pcm = text_to_speech_pcm(text)
-    if not pcm or len(pcm) == 0:
-        return False
+    duration_sec = play_speech_on_laptop(text)
+    if duration_sec is None:
+        # Fallback to duration estimate based on text length
+        duration_sec = max(5.0, len(text) * 0.1)
+    
     try:
-        duration_sec = len(pcm) / 8000  # PCM is 8kHz mono 8-bit
         with send_lock:
             if header:
                 conn.sendall(header)
             conn.sendall(f"DURATION:{duration_sec:.1f}\n".encode())
-            conn.sendall(f"AUDIO:{len(pcm)}\n".encode())
-            conn.sendall(pcm)
-        print(f"[TTS] Sent {len(pcm)} bytes ({duration_sec:.1f}s) to ESP32")
+        print(f"[TTS Laptop] Sent sync instructions (duration: {duration_sec:.1f}s) to ESP32")
         return True
     except Exception as e:
-        print(f"[TTS Error] Failed to send audio: {e}")
+        print(f"[TTS Laptop Error] Failed to send sync: {e}")
         return False
 
 # --- REMINDERS & SCHEDULER STORE ---
@@ -329,6 +352,75 @@ def clear_reminders():
     with db_lock:
         _save_reminders_internal([])
 
+def delete_reminder_by_index(index):
+    with db_lock:
+        reminders = _load_reminders_internal()
+        active_reminders = [r for r in reminders if not r.get("fired", False)]
+        if 1 <= index <= len(active_reminders):
+            target = active_reminders[index - 1]
+            target["fired"] = True
+            _save_reminders_internal(reminders)
+            return target.get("task", "Reminder")
+        return None
+
+def get_weather():
+    try:
+        # Lat/Lon for Khulna, Bangladesh (KUET coordinates)
+        url = "https://api.open-meteo.com/v1/forecast?latitude=22.8956&longitude=89.5011&current_weather=true"
+        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+        with urllib.request.urlopen(req, timeout=5) as response:
+            data = json.loads(response.read().decode("utf-8"))
+            current = data.get("current_weather", {})
+            temp = round(current.get("temperature", 25))
+            code = current.get("weathercode", 0)
+            if code == 0:
+                desc, icon_idx = "SUNNY", 0
+            elif code in [1, 2, 3, 45, 48]:
+                desc, icon_idx = "CLOUDY", 1
+            elif code in [71, 72, 73, 75, 77, 85, 86]:
+                desc, icon_idx = "SNOWY", 3
+            else:
+                desc, icon_idx = "RAINY", 2
+            return temp, desc, icon_idx
+    except Exception as e:
+        print(f"[Weather Error] {e}")
+        return None, None, None
+
+def fetch_and_send_weather(conn):
+    temp, desc, icon_idx = get_weather()
+    if temp is not None:
+        try:
+            with send_lock:
+                conn.sendall(f"WEATHER:{temp}:{desc}:{icon_idx}\n".encode())
+            print(f"[Weather] Sent conditions to client: {temp}C, {desc}")
+        except Exception as e:
+            print(f"[Weather] Failed to send weather: {e}")
+
+def parse_timer_duration(text):
+    match = re.search(r'(\d+)\s*(second|sec|minute|min|hour|hr|s|m|h)s?', text.lower())
+    if match:
+        val = int(match.group(1))
+        unit = match.group(2)
+        if unit.startswith('s'):
+            return val
+        elif unit.startswith('m'):
+            return val * 60
+        elif unit.startswith('h'):
+            return val * 3600
+    return None
+
+def format_duration(seconds):
+    if seconds < 60:
+        return f"{seconds} seconds"
+    elif seconds < 3600:
+        m = seconds // 60
+        s = seconds % 60
+        return f"{m} minutes and {s} seconds" if s > 0 else f"{m} minutes"
+    else:
+        h = seconds // 3600
+        m = (seconds % 3600) // 60
+        return f"{h} hours and {m} minutes" if m > 0 else f"{h} hours"
+
 def alarm_scheduler():
     global active_alarm_active, active_alarm_name, active_conn
     print("[*] Alarm scheduler active.")
@@ -419,6 +511,7 @@ class VoiceAgentHandler:
         self.send_lock = threading.Lock()
         # Enable TCP_NODELAY to avoid Nagle delays on small state commands
         self.conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        self.timer_running = False
         
     def calibrate(self):
         print(f"[*] Calibrating noise baseline for {self.addr}...")
@@ -459,6 +552,14 @@ class VoiceAgentHandler:
         """Thread-safe sendall using global lock."""
         with send_lock:
             self.conn.sendall(data)
+
+    def weather_updater(self):
+        while True:
+            time.sleep(1800)
+            if active_conn == self.conn:
+                fetch_and_send_weather(self.conn)
+            else:
+                break
 
     def keyword_detection_loop(self):
         while True:
@@ -514,29 +615,114 @@ class VoiceAgentHandler:
             if time.time() - self.last_keyword_trigger < KEYWORD_DEBOUNCE_SECONDS:
                 continue
 
-            # Feature 1: Reminder check
-            if "reminder" in clean_text:
+            # Feature 1: Reminder List check
+            has_target_word = any(w in clean_text for w in ["reminder", "reminders", "alarm", "alarms", "task", "tasks"])
+            is_creation_intent = any(w in clean_text for w in ["set", "add", "create", "remind me", "remind me to"])
+            is_delete_intent = any(w in clean_text for w in ["delete", "remove", "clear", "cancel"])
+            
+            if has_target_word and not is_creation_intent and not is_delete_intent:
                 self.last_keyword_trigger = time.time()
                 self.send_reminder_list()
                 continue
 
-            # Feature 2: Hi greeting
-            if any(clean_text == w or clean_text.startswith(w + " ") for w in ["hi", "hello", "hey"]):
+            # Feature 2: Reminder Deletion check
+            is_delete_query = any(w in clean_text for w in ["delete", "remove", "clear", "cancel"]) and \
+                              any(w in clean_text for w in ["reminder", "alarm", "task", "all", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "first", "second", "third", "fourth", "fifth"])
+            
+            if is_delete_query:
+                self.last_keyword_trigger = time.time()
+                if "all" in clean_text or "every" in clean_text:
+                    clear_reminders()
+                    self.safe_send(b"UI_MSG:Cleared all.\n")
+                    play_speech_on_laptop("Cleared all reminders.")
+                else:
+                    idx = self.extract_index(clean_text)
+                    if idx is not None:
+                        deleted_task = delete_reminder_by_index(idx)
+                        if deleted_task:
+                            msg = f"Deleted number {idx}: {deleted_task}."
+                            self.safe_send(f"UI_MSG:Deleted #{idx}\n".encode())
+                            play_speech_on_laptop(msg)
+                            # Send updated list after a short delay
+                            threading.Timer(1.5, self.send_reminder_list).start()
+                        else:
+                            self.safe_send(b"UI_MSG:Not found.\n")
+                            play_speech_on_laptop(f"Could not find reminder number {idx}.")
+                    else:
+                        self.safe_send(b"UI_MSG:Specify index.\n")
+                        play_speech_on_laptop("Which reminder number would you like to delete?")
+                continue
+
+            # Feature 3: Hi greeting
+            if any(clean_text == w or clean_text.startswith(w + " ") for w in ["hi", "hello", "hey", "yo"]):
                 self.last_keyword_trigger = time.time()
                 self.play_greeting()
                 continue
 
-            # Feature 3: Single question
-            if self.is_question(clean_text):
+            # Feature 4: Timer check
+            is_timer_query = any(w in clean_text for w in ["timer", "countdown", "focus"])
+            if is_timer_query:
                 self.last_keyword_trigger = time.time()
-                self.handle_single_question(text)
+                if any(w in clean_text for w in ["cancel", "stop", "quit", "terminate", "shut up", "stop it"]):
+                    if self.timer_running:
+                        self.timer_running = False
+                        try:
+                            self.safe_send(b"TIMER_CANCEL\n")
+                        except Exception:
+                            pass
+                        play_speech_on_laptop("Timer stopped.")
+                    else:
+                        play_speech_on_laptop("No timer is currently running.")
+                else:
+                    duration = parse_timer_duration(clean_text)
+                    if duration is not None:
+                        self.timer_running = True
+                        try:
+                            self.safe_send(f"TIMER_START:{duration}\n".encode())
+                        except Exception:
+                            pass
+                        play_speech_on_laptop(f"Starting countdown for {format_duration(duration)}.")
+                    else:
+                        play_speech_on_laptop("Please specify seconds, minutes, or hours.")
                 continue
+
+    def extract_index(self, text):
+        number_map = {
+            "first": 1, "one": 1, "1st": 1, "1": 1,
+            "second": 2, "two": 2, "2nd": 2, "2": 2,
+            "third": 3, "three": 3, "3rd": 3, "3": 3,
+            "fourth": 4, "four": 4, "4th": 4, "4": 4,
+            "fifth": 5, "five": 5, "5th": 5, "5": 5,
+            "sixth": 6, "six": 6, "6th": 6, "6": 6,
+            "seventh": 7, "seven": 7, "7th": 7, "7": 7,
+            "eighth": 8, "eight": 8, "8th": 8, "8": 8,
+            "ninth": 9, "nine": 9, "9th": 9, "9": 9,
+            "tenth": 10, "ten": 10, "10th": 10, "10": 10
+        }
+        words = text.split()
+        for word in words:
+            clean_word = re.sub(r'[^\w]', '', word).lower()
+            if clean_word in number_map:
+                return number_map[clean_word]
+        match = re.search(r'\b\d+\b', text)
+        if match:
+            return int(match.group(0))
+        return None
 
     def send_reminder_list(self):
         reminders = get_reminders_list()
         try:
             if reminders:
-                items_str = "|".join([f"{r['task']} ({r.get('display_time', '?')})" for r in reminders])
+                formatted_items = []
+                for idx, r in enumerate(reminders, 1):
+                    task = r['task']
+                    time_str = r.get('display_time', '?')
+                    # Format default Alarm vs task with description
+                    if task.lower() in ["reminder", "alarm"]:
+                        formatted_items.append(f"{idx}. {task} @ {time_str}")
+                    else:
+                        formatted_items.append(f"{idx}. {task} @ {time_str}")
+                items_str = "|".join(formatted_items)
                 self.safe_send(f"UI_LIST:{items_str}\n".encode())
             else:
                 self.safe_send(b"UI_MSG:No active reminders.\n")
@@ -597,6 +783,9 @@ class VoiceAgentHandler:
         # Start keyword detection thread
         kw_thread = threading.Thread(target=self.keyword_detection_loop, daemon=True)
         kw_thread.start()
+        # Start weather updater thread and fetch weather immediately
+        fetch_and_send_weather(self.conn)
+        threading.Thread(target=self.weather_updater, daemon=True).start()
         # Set recv timeout to detect dead connections (30s)
         self.conn.settimeout(30)
         try:
@@ -731,6 +920,10 @@ class VoiceAgentHandler:
         num_samples = len(audio_bytes) / 2
         if num_samples < 100:
             print(f"[!] Too few samples ({int(num_samples)}), skipping")
+            try:
+                self.safe_send(b"UI_STATE:IDLE\n")
+            except Exception:
+                pass
             return
 
         if self.first_audio_time > 0 and self.recording_start_time > 0:
@@ -776,6 +969,10 @@ class VoiceAgentHandler:
             
             if not text:
                 print("[No readable speech transcribed]")
+                try:
+                    self.safe_send(b"UI_STATE:IDLE\n")
+                except Exception:
+                    pass
                 return
                 
             print(f"[{'AWAKE' if self.is_awake else 'SLEEPING'}] Heard: '{text}'")
@@ -788,11 +985,40 @@ class VoiceAgentHandler:
             except Exception:
                 pass
             
-            # --- ALARM DISMISSAL CHECK ---
-            if active_alarm_active:
+            # --- TIMER RUNNING BLOCK ---
+            if self.timer_running:
                 clean_text = re.sub(r'[^\w\s]', '', text.lower()).strip()
-                if any(word in clean_text for word in ["stop", "dismiss", "cancel", "shut up", "turn off"]):
-                    stop_active_alarm()
+                if any(word in clean_text for word in ["stop", "cancel", "quit", "dismiss", "terminate", "shut up", "stop it"]):
+                    self.timer_running = False
+                    try:
+                        self.safe_send(b"TIMER_CANCEL\n")
+                    except Exception:
+                        pass
+                    play_speech_on_laptop("Timer stopped.")
+                    self.is_awake = False
+                    try:
+                        self.safe_send(b"UI_STATE:IDLE\n")
+                    except Exception:
+                        pass
+                else:
+                    play_speech_on_laptop("Countdown is active. Say stop timer to cancel.")
+                    self.is_awake = False
+                    try:
+                        self.safe_send(b"UI_STATE:IDLE\n")
+                    except Exception:
+                        pass
+                return
+
+            # --- ALARM DISMISSAL CHECK ---
+            clean_text = re.sub(r'[^\w\s]', '', text.lower()).strip()
+            if active_alarm_active or any(word in clean_text for word in ["stop", "dismiss", "cancel", "shut up", "turn off", "stop it", "quit"]):
+                if any(word in clean_text for word in ["stop", "dismiss", "cancel", "shut up", "turn off", "stop it", "quit"]):
+                    if active_alarm_active:
+                        stop_active_alarm()
+                    try:
+                        self.safe_send(b"TIMER_STOP\n")
+                    except Exception:
+                        pass
                     self.is_awake = False
                     self.safe_send(b"UI_STATE:IDLE\n")
                     return
@@ -832,6 +1058,8 @@ class VoiceAgentHandler:
         
         # Strip commands from message sent to user
         clean_answer = re.sub(r'\[CMD:[^\]]+\]', '', ai_answer).strip()
+        # Remove any emojis/emoticons to prevent display corruption
+        clean_answer = re.sub(r'[\U00010000-\U0010ffff]', '', clean_answer).strip()
         
         try:
             if add_match:
@@ -851,12 +1079,7 @@ class VoiceAgentHandler:
                     self.safe_send(b"UI_MSG:Invalid time format.\n")
                 
             elif list_match:
-                reminders = get_reminders_list()
-                if reminders:
-                    items_str = "|".join([f"{r['task']} ({r.get('display_time', '?')})" for r in reminders])
-                    self.safe_send(f"UI_LIST:{items_str}\n".encode())
-                else:
-                    self.safe_send(b"UI_MSG:No active reminders.\n")
+                self.send_reminder_list()
                     
             elif clear_match:
                 clear_reminders()

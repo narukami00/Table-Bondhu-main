@@ -2,7 +2,6 @@
 #include <WiFi.h>
 #include <TFT_eSPI.h>
 #include <driver/i2s.h>
-#include <driver/dac.h>
 #include <time.h>
 #include "soc/soc.h"
 #include "soc/rtc_cntl_reg.h"
@@ -56,21 +55,35 @@ struct ThemePalette {
 };
 
 const ThemePalette THEMES[4] = {
-  { 0x0000, 0xF800, 0xF800, 0x0000, 0xFFFF, 0xF800 },  // Night: dark bg, red accent
-  { 0x4100, 0xFBE0, 0xFBE0, 0x0000, 0xFFFF, 0xFDA0 },  // Autumn: dark orange bg, yellow
-  { 0x0320, 0x07E0, 0x07E0, 0x0000, 0xFFFF, 0x07E0 },  // Spring: dark green bg, green
-  { DEFAULT_BG, DEFAULT_ACCENT, DEFAULT_BORDER, DEFAULT_BUBBLE_BG, DEFAULT_TEXT, DEFAULT_STATUS }  // Bright: default
+  { 0x0000, 0xFFE0, 0xFFE0, 0x0000, 0xFFFF, 0xFFE0 },  // Night: black bg, yellow accent
+  { 0x000F, 0x867D, 0x867D, 0x000A, 0xFFFF, 0x867D },  // Dusk: navy bg, light blue accent
+  { 0xFD00, 0x3800, 0x3800, 0xFFFF, 0x0000, 0x3800 },  // Autumn: orange bg, dark red-brown accent
+  { 0xFFFF, 0x001F, 0x001F, 0xFFFF, 0x001F, 0x001F }   // Bright: white bg, dark blue text
 };
 
-#define LDR_CONFIRM_READS 3
-#define THEME_COOLDOWN_MS 60000
+#define THEME_COOLDOWN_MS 5000
+#define THEME_CLOCK_MIN_MS 2000
 
-int activeTheme = 3;  // Start at default
-int pendingTheme = -1;
-int pendingCount = 0;
+int activeTheme = 3;  // Start at Bright
 unsigned long lastSwitchMs = 0;
 unsigned long lastThemeLdrMs = 0;
 int cachedLdr = 2048;
+
+// Weather variables
+int weatherTemp = 25;
+String weatherDesc = "SUNNY";
+int weatherIconIdx = 0;
+bool hasWeather = false;
+
+// Timer / Countdown variables
+int timerSecondsLeft = 0;
+unsigned long lastTimerTickMs = 0;
+
+// Redraw control
+bool needRedraw = true;
+
+// Forward declarations
+void dissolveWipe(uint16_t targetColor);
 
 // TFT and sprites — must be before any function that uses them
 TFT_eSPI tft = TFT_eSPI();
@@ -88,13 +101,15 @@ enum AppState {
   STATE_SPEAKING,
   STATE_WAVING_OUTRO,
   STATE_ALARM,
-  STATE_REMINDERS
+  STATE_REMINDERS,
+  STATE_TIMER,
+  STATE_TIMER_FINISHED
 };
 
 int ldrToTheme(int ldr) {
   if (ldr < 300) return 0;       // Night
-  if (ldr < 1000) return 1;      // Autumn
-  if (ldr < 1700) return 2;      // Spring
+  if (ldr < 700) return 1;       // Dusk
+  if (ldr < 1200) return 2;      // Autumn
   return 3;                       // Bright
 }
 
@@ -106,7 +121,8 @@ void switchTheme(int idx) {
   COLOR_BUBBLE_BG = THEMES[idx].bubbleBg;
   COLOR_TEXT = THEMES[idx].text;
   COLOR_STATUS = THEMES[idx].status;
-  tft.fillScreen(COLOR_BG);
+  dissolveWipe(COLOR_BG);
+  needRedraw = true;
   Serial.printf("[THEME] Switched to theme %d (LDR=%d)\n", idx, cachedLdr);
 }
 
@@ -209,9 +225,6 @@ String bubbleLines[BUBBLE_LINES_MAX];
 int bubbleLineCount = 0;
 bool greetingMode = false;  // True when wave was triggered by greeting (skip LISTENING on finish)
 
-// Redraw control
-bool needRedraw = true;
-
 // Timezone offset (Bangladesh Standard Time GMT+6 = 6 * 3600 seconds)
 const long gmtOffset_sec = 6 * 3600;
 const int daylightOffset_sec = 0;
@@ -224,6 +237,8 @@ void drawBubbleText(String text);
 void drawCameoFrame();
 void drawWaveFrame();
 void dissolveWipe(uint16_t targetColor);
+void drawRemindersPage();
+void drawTimerPage();
 
 void setupI2S() {
   i2s_config_t i2s_config = {
@@ -257,10 +272,7 @@ void setAppState(AppState newState) {
       ledcWriteTone(0, 0);
       buzzerActive = false;
     }
-    // Stop DAC audio when leaving speaking state
-    if (oldState == STATE_SPEAKING) {
-      playAudioStop();
-    }
+
     
     // Dissolve only on button press (Clock → Waving Intro) — skip for greeting and routine transitions
     if (oldState == STATE_CLOCK && currentState == STATE_WAVING_INTRO && !greetingMode) {
@@ -299,6 +311,18 @@ void setAppState(AppState newState) {
     } else if (currentState == STATE_ALARM) {
       lastBubbleText = "";  // Force bubble redraw on new text
       drawBubbleText(currentResponseText);
+    } else if (currentState == STATE_REMINDERS) {
+      bubbleLineCount = 0;  // Force re-pagination
+      textPage = 0;
+      drawRemindersPage();
+    } else if (currentState == STATE_TIMER) {
+      drawTimerPage();
+    } else if (currentState == STATE_TIMER_FINISHED) {
+      shakeX = 0;
+      shakeY = 0;
+      waveFrame = 0;
+      waveFrameStartMs = millis();
+      needRedraw = true;
     }
   }
 }
@@ -306,7 +330,13 @@ void setAppState(AppState newState) {
 void drawAvatar() {
   const uint16_t* frameData = CURRENT_IDLE;
   
-  if (currentState == STATE_SPEAKING || currentState == STATE_ALARM) {
+  if (currentState == STATE_TIMER_FINISHED) {
+    #if ACTIVE_THEME == THEME_PIKACHU
+      frameData = (waveFrame % 2 == 0) ? pika_wave_1 : pika_wave_2; // Waving high
+    #else
+      frameData = (waveFrame % 2 == 0) ? avatar_wave_1 : avatar_wave_2;
+    #endif
+  } else if (currentState == STATE_SPEAKING || currentState == STATE_ALARM) {
     if (currentState == STATE_ALARM) {
       frameData = CURRENT_TALK_100; // Wide open mouth for alarm shocked face
     } else if (isBlinking) {
@@ -332,7 +362,7 @@ void drawAvatar() {
   }
 
   // Draw avatar to sprite and push with flashing background if in Alarm state
-  uint16_t bgCol = (currentState == STATE_ALARM && alarmFlashState) ? TFT_RED : COLOR_BG;
+  uint16_t bgCol = ((currentState == STATE_ALARM || currentState == STATE_TIMER_FINISHED) && alarmFlashState) ? TFT_RED : COLOR_BG;
   faceSprite.fillSprite(bgCol);
   pushThemedImage(faceSprite, 0, 0, 128, 128, frameData);
   faceSprite.pushSprite(shakeX, shakeY);
@@ -460,6 +490,29 @@ void drawClockFace() {
   tft.drawRect(2, 2, 124, 156, COLOR_BORDER);
   tft.drawRect(4, 4, 120, 152, COLOR_BG);
   
+  if (hasWeather) {
+    if (weatherIconIdx == 0) {
+      tft.fillCircle(24, 14, 4, TFT_YELLOW);
+    } else if (weatherIconIdx == 1) {
+      tft.fillCircle(22, 16, 3, COLOR_BORDER);
+      tft.fillCircle(26, 14, 4, COLOR_BORDER);
+    } else if (weatherIconIdx == 2) {
+      tft.fillCircle(22, 14, 3, COLOR_BORDER);
+      tft.fillCircle(26, 12, 4, COLOR_BORDER);
+      tft.drawLine(22, 18, 20, 21, COLOR_ACCENT);
+      tft.drawLine(26, 18, 24, 21, COLOR_ACCENT);
+    } else if (weatherIconIdx == 3) {
+      tft.fillCircle(22, 14, 3, COLOR_BORDER);
+      tft.fillCircle(26, 12, 4, COLOR_BORDER);
+      tft.drawPixel(22, 19, COLOR_ACCENT);
+      tft.drawPixel(26, 19, COLOR_ACCENT);
+    }
+    tft.setTextColor(COLOR_ACCENT, COLOR_BG);
+    tft.setTextSize(1);
+    tft.setCursor(38, 11);
+    tft.printf("%dC %s", weatherTemp, weatherDesc.c_str());
+  }
+  
   // Clear "Syncing Time..." area from previous failed NTP attempt
   tft.fillRect(4, 20, 120, 20, COLOR_BG);
   
@@ -549,7 +602,7 @@ void updateAnimations() {
     }
     
     // LDR-based theme switching (disable I2S ADC temporarily for analogRead)
-    if (now - lastThemeLdrMs > 3000) {
+    if (now - lastThemeLdrMs > 1500) {
       lastThemeLdrMs = now;
       i2s_stop(I2S_NUM_0);
       i2s_adc_disable(I2S_NUM_0);
@@ -559,18 +612,11 @@ void updateAnimations() {
       client.print("LDR:" + String(cachedLdr) + "\n");
       
       int detectedTheme = ldrToTheme(cachedLdr);
-      if (detectedTheme == pendingTheme) {
-        pendingCount++;
-      } else {
-        pendingTheme = detectedTheme;
-        pendingCount = 1;
-      }
-      if (pendingCount >= LDR_CONFIRM_READS
-          && detectedTheme != activeTheme
+      if (detectedTheme != activeTheme
+          && (now - stateTimerMs > THEME_CLOCK_MIN_MS)
           && (now - lastSwitchMs > THEME_COOLDOWN_MS)) {
         switchTheme(detectedTheme);
         lastSwitchMs = now;
-        needRedraw = true;
       }
     }
     
@@ -726,6 +772,38 @@ void updateAnimations() {
     setAppState(STATE_WAVING_OUTRO);
   }
   
+  // Timeout for STATE_REMINDERS to return back to clock state after 20 seconds
+  if (currentState == STATE_REMINDERS && (now - stateTimerMs > 20000)) {
+    setAppState(STATE_CLOCK);
+  }
+  
+  // Local timer decrement
+  if (currentState == STATE_TIMER) {
+    if (now - lastTimerTickMs >= 1000) {
+      timerSecondsLeft--;
+      lastTimerTickMs = now;
+      if (timerSecondsLeft <= 0) {
+        // Trigger timer finished alarm locally!
+        buzzerActive = true;
+        buzzerStartMs = millis();
+        ledcWriteTone(0, 1000);
+        setAppState(STATE_TIMER_FINISHED);
+      } else {
+        needRedraw = true;
+      }
+    }
+  }
+  
+  // Waving animation update for TIMER_FINISHED
+  if (currentState == STATE_TIMER_FINISHED) {
+    unsigned long elapsed = now - waveFrameStartMs;
+    if (elapsed > 300) {
+      waveFrame = (waveFrame == 0) ? 1 : 0;
+      waveFrameStartMs = now;
+      needRedraw = true;
+    }
+  }
+  
   // 8. Thinking Status Dots Animation
   if (currentState == STATE_THINKING) {
     if (now - lastAnimationUpdateMs > 500) {
@@ -746,19 +824,26 @@ void updateAnimations() {
   
   // 10. Draw UI only when there's an actual change
   if (needRedraw) {
-    drawAvatar();
-    
-    // Redraw overlay on top of the avatar's bottom overlap area
-    if (currentState == STATE_IDLE) {
-      drawIdleOverlay();
-    } else if (currentState == STATE_LISTENING) {
-      drawListeningOverlay();
-    } else if (currentState == STATE_THINKING) {
-      drawThinkingOverlay();
-    } else if (currentState == STATE_SPEAKING || currentState == STATE_ALARM) {
-      drawBubbleText(currentResponseText);
+    if (currentState == STATE_REMINDERS) {
+      drawRemindersPage();
+    } else if (currentState == STATE_TIMER) {
+      drawTimerPage();
+    } else {
+      drawAvatar();
+      
+      // Redraw overlay on top of the avatar's bottom overlap area
+      if (currentState == STATE_IDLE) {
+        drawIdleOverlay();
+      } else if (currentState == STATE_LISTENING) {
+        drawListeningOverlay();
+      } else if (currentState == STATE_THINKING) {
+        drawThinkingOverlay();
+      } else if (currentState == STATE_SPEAKING || currentState == STATE_ALARM) {
+        drawBubbleText(currentResponseText);
+      } else if (currentState == STATE_TIMER_FINISHED) {
+        drawBubbleText("TIME'S UP!");
+      }
     }
-    
     needRedraw = false;
   }
 
@@ -772,17 +857,18 @@ void updateAnimations() {
 
   // 12. Alarm flashing state update
   static unsigned long lastAlarmFlashMs = 0;
-  if (currentState == STATE_ALARM) {
+  if (currentState == STATE_ALARM || currentState == STATE_TIMER_FINISHED) {
     if (now - lastAlarmFlashMs > 250) {
       alarmFlashState = !alarmFlashState;
       lastAlarmFlashMs = now;
       needRedraw = true;
     }
     
-    // Aggressive buzzer: 100ms toggle (5Hz) for 10 seconds
+    // Aggressive buzzer: 100ms toggle (5Hz)
     if (buzzerActive) {
       unsigned long elapsed = now - buzzerStartMs;
-      if (elapsed < 10000) {
+      unsigned long maxBuzzTime = (currentState == STATE_TIMER_FINISHED) ? 60000 : 10000;
+      if (elapsed < maxBuzzTime) {
         bool on = (elapsed / 100) % 2 == 0;
         ledcWriteTone(0, on ? 1000 : 0);
         static unsigned long lastBuzzerLogMs = 0;
@@ -793,15 +879,18 @@ void updateAnimations() {
       } else {
         ledcWriteTone(0, 0);
         buzzerActive = false;
-        Serial.println("[BUZZER] Buzzer stopped after 10 seconds");
+        Serial.printf("[BUZZER] Buzzer stopped after timeout\n");
         setAppState(STATE_CLOCK);  // Auto-dismiss alarm after buzzer stops
         return;
       }
     }
     
-    // Hard 30-second timeout as backup
-    if (now - stateTimerMs > 30000) {
-      Serial.println("[ALARM] Auto-dismissed after 30s timeout");
+    // Hard backup timeout
+    unsigned long maxAlarmTimeout = (currentState == STATE_TIMER_FINISHED) ? 60000 : 30000;
+    if (now - stateTimerMs > maxAlarmTimeout) {
+      Serial.println("[ALARM] Auto-dismissed after backup timeout");
+      ledcWriteTone(0, 0);
+      buzzerActive = false;
       setAppState(STATE_CLOCK);
       return;
     }
@@ -967,9 +1056,88 @@ void drawBubbleText(String text) {
   }
 }
 
-// Forward declarations for audio timer (defined after setup)
-static hw_timer_t *audioTimer = NULL;
-void IRAM_ATTR audioTimerISR();
+void drawRemindersPage() {
+  tft.fillScreen(COLOR_BG);
+  tft.drawRect(2, 2, 124, 156, COLOR_BORDER);
+  tft.drawRect(4, 4, 120, 152, COLOR_BG);
+  
+  // Title
+  tft.setTextColor(COLOR_ACCENT, COLOR_BG);
+  tft.setTextSize(1);
+  tft.setCursor(15, 12);
+  tft.print("ACTIVE REMINDERS");
+  tft.drawLine(6, 22, 122, 22, COLOR_BORDER);
+  
+  // Paginate if not already done
+  if (bubbleLineCount == 0) {
+    paginateText(currentResponseText);
+  }
+  
+  int itemsPerPage = 10;
+  int totalPages = (bubbleLineCount + itemsPerPage - 1) / itemsPerPage;
+  if (totalPages < 1) totalPages = 1;
+  
+  int startIdx = textPage * itemsPerPage;
+  int endIdx = startIdx + itemsPerPage;
+  if (endIdx > bubbleLineCount) endIdx = bubbleLineCount;
+  
+  tft.setTextColor(COLOR_TEXT, COLOR_BG);
+  int cursorY = 30;
+  for (int i = startIdx; i < endIdx; i++) {
+    tft.setCursor(8, cursorY);
+    tft.print(bubbleLines[i]);
+    cursorY += 11;
+  }
+  
+  // Page indicator at bottom
+  tft.setTextColor(COLOR_STATUS, COLOR_BG);
+  tft.setCursor(45, 142);
+  tft.printf("%d / %d", textPage + 1, totalPages);
+}
+
+void drawTimerPage() {
+  tft.fillScreen(COLOR_BG);
+  tft.drawRect(2, 2, 124, 156, COLOR_BORDER);
+  tft.drawRect(4, 4, 120, 152, COLOR_BG);
+  
+  // Title
+  tft.setTextColor(COLOR_ACCENT, COLOR_BG);
+  tft.setTextSize(1);
+  tft.setCursor(30, 15);
+  tft.print("FOCUS TIMER");
+  tft.drawLine(6, 25, 122, 25, COLOR_BORDER);
+  
+  // Format MM:SS or HH:MM:SS
+  char timeBuffer[16];
+  int h = timerSecondsLeft / 3600;
+  int m = (timerSecondsLeft % 3600) / 60;
+  int s = timerSecondsLeft % 60;
+  
+  if (h > 0) {
+    snprintf(timeBuffer, sizeof(timeBuffer), "%02d:%02d:%02d", h, m, s);
+  } else {
+    snprintf(timeBuffer, sizeof(timeBuffer), "%02d:%02d", m, s);
+  }
+  
+  // Large timer text
+  tft.setTextColor(COLOR_TEXT, COLOR_BG);
+  tft.setTextSize(3);
+  int textW = strlen(timeBuffer) * 18;
+  tft.setCursor((128 - textW) / 2, 60);
+  tft.print(timeBuffer);
+  
+  // Focus text at bottom
+  tft.setTextColor(COLOR_STATUS, COLOR_BG);
+  tft.setTextSize(1);
+  tft.setCursor(20, 110);
+  tft.print("STAY FOCUSED!");
+  
+  tft.drawRoundRect(10, 128, 108, 20, 4, COLOR_BORDER);
+  tft.setCursor(22, 134);
+  tft.print("SAY: CANCEL TIMER");
+}
+
+
 
 void setup() {
   WRITE_PERI_REG(RTC_CNTL_BROWN_OUT_REG, 0); // Disable brownout detector
@@ -994,7 +1162,7 @@ void setup() {
   faceSprite.setSwapBytes(true);
   
   tft.fillScreen(COLOR_BG);
-  tft.setTextColor(TFT_WHITE, COLOR_BG);
+  tft.setTextColor(COLOR_TEXT, COLOR_BG);
   tft.setTextSize(1);
   tft.setCursor(10, 10);
   tft.println("Connecting...");
@@ -1020,58 +1188,13 @@ void setup() {
   client.setTimeout(2);
   setupI2S();
 
-  // Create audio timer once — never destroy/recreate it
-  audioTimer = timerBegin(1, 80, true);
-  timerAttachInterrupt(audioTimer, &audioTimerISR, true);
-  timerAlarmWrite(audioTimer, 125, true);  // 1MHz/125 = 8kHz
+
 
   tft.fillScreen(COLOR_BG);
   setAppState(STATE_CLOCK);
 }
 
-// --- Non-blocking audio playback via hardware timer + DAC (GPIO 25) ---
-static volatile uint8_t *audioBuf = NULL;
-static volatile uint32_t audioPlayLen = 0;
-static volatile uint32_t audioPlayIdx = 0;
-static volatile bool audioPlaying = false;
 
-void IRAM_ATTR audioTimerISR() {
-  if (!audioPlaying || audioPlayIdx >= audioPlayLen) {
-    audioPlaying = false;
-    return;
-  }
-  uint8_t raw = audioBuf[audioPlayIdx++];
-  // Software gain: center at 128, amplify 3x, clamp
-  int16_t boosted = ((int16_t)raw - 128) * 3 + 128;
-  if (boosted > 255) boosted = 255;
-  if (boosted < 0) boosted = 0;
-  dac_output_voltage(DAC_CHANNEL_1, (uint8_t)boosted);
-}
-
-void playAudioStart(const uint8_t* buf, uint32_t len) {
-  playAudioStop();
-  audioBuf = (uint8_t *)malloc(len);
-  if (!audioBuf) return;
-  memcpy((void*)audioBuf, buf, len);
-
-  audioPlayLen = len;
-  audioPlayIdx = 0;
-  audioPlaying = true;
-
-  dac_output_enable(DAC_CHANNEL_1);
-  timerAlarmEnable(audioTimer);
-  Serial.printf("[AUDIO] Playing %u bytes at 8kHz\n", len);
-}
-
-void playAudioStop() {
-  audioPlaying = false;
-  timerAlarmDisable(audioTimer);
-  if (audioBuf) {
-    free((void*)audioBuf);
-    audioBuf = NULL;
-  }
-  dac_output_disable(DAC_CHANNEL_1);
-}
 
 void loop() {
   updateAnimations();
@@ -1104,11 +1227,15 @@ void loop() {
   lastButtonState = buttonPressed;
 
   // BOOT button: paginate text or clear when no more pages
-  if (currentState == STATE_SPEAKING || currentState == STATE_ALARM) {
+  if (currentState == STATE_SPEAKING || currentState == STATE_ALARM || currentState == STATE_REMINDERS) {
     bool bootPressed = (digitalRead(BOOT_BTN) == LOW);
     if (bootPressed && !lastBootBtnState) {
       textPage++;
-      if (textPage >= textTotalPages) {
+      int itemsPerPage = (currentState == STATE_REMINDERS) ? 10 : BUBBLE_LINES_PER_PAGE;
+      int totalPages = (bubbleLineCount + itemsPerPage - 1) / itemsPerPage;
+      if (totalPages < 1) totalPages = 1;
+      
+      if (textPage >= totalPages) {
         // No more pages — clear text and return to clock
         lastBubbleText = "";
         bubbleLineCount = 0;
@@ -1178,24 +1305,7 @@ void loop() {
     response.trim(); 
     
     if (response.length() > 0) {
-      if (response.startsWith("AUDIO:")) {
-        uint32_t audioLen = response.substring(6).toInt();
-        if (audioLen > 0 && audioLen < 200000) {
-          uint8_t* tmpBuf = (uint8_t*)malloc(audioLen);
-          if (tmpBuf) {
-            uint32_t bytesRead = 0;
-            unsigned long timeout = millis() + 10000;
-            while (bytesRead < audioLen && millis() < timeout) {
-              int n = client.read(tmpBuf + bytesRead, audioLen - bytesRead);
-              if (n > 0) bytesRead += n;
-              else delay(1);
-            }
-            playAudioStart(tmpBuf, bytesRead);
-            free(tmpBuf);
-          }
-        }
-      }
-      else if (response.startsWith("CMD:WAKE") || response == "UI_STATE:LISTENING") {
+      if (response.startsWith("CMD:WAKE") || response == "UI_STATE:LISTENING") {
         serverDuration = 0;
         setAppState(STATE_WAVING_INTRO);
       }
@@ -1211,6 +1321,27 @@ void loop() {
       else if (response == "UI_STATE:IDLE") {
         serverDuration = 0;
         setAppState(STATE_CLOCK);
+      }
+      else if (response.startsWith("TIMER_START:")) {
+        timerSecondsLeft = response.substring(12).toInt();
+        lastTimerTickMs = millis();
+        setAppState(STATE_TIMER);
+      }
+      else if (response == "TIMER_CANCEL" || response == "TIMER_STOP") {
+        ledcWriteTone(0, 0);
+        buzzerActive = false;
+        setAppState(STATE_CLOCK);
+      }
+      else if (response.startsWith("WEATHER:")) {
+        int firstColon = response.indexOf(':', 8);
+        int secondColon = response.indexOf(':', firstColon + 1);
+        if (firstColon != -1 && secondColon != -1) {
+          weatherTemp = response.substring(8, firstColon).toInt();
+          weatherDesc = response.substring(firstColon + 1, secondColon);
+          weatherIconIdx = response.substring(secondColon + 1).toInt();
+          hasWeather = true;
+          needRedraw = true;
+        }
       }
       else if (response.startsWith("UI_ALARM:")) {
         serverDuration = 0;
@@ -1231,11 +1362,11 @@ void loop() {
       else if (response.startsWith("UI_LIST:")) {
         serverDuration = 0;  // Clear any stale duration
         String listContent = response.substring(8);
-        listContent.replace("|", " "); // replace pipe with space for wrapping
+        listContent.replace("|", "\n"); // replace pipe with newline for pagination
         currentResponseText = listContent;
         speakingStartMs = millis();
-        speakingDuration = 12000UL; // Display reminders for 12 seconds
-        setAppState(STATE_SPEAKING);
+        speakingDuration = 20000UL; // Display reminders for 20 seconds
+        setAppState(STATE_REMINDERS);
       }
       else {
         // Chat text response
