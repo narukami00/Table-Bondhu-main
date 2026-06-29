@@ -615,6 +615,23 @@ class VoiceAgentHandler:
             if time.time() - self.last_keyword_trigger < KEYWORD_DEBOUNCE_SECONDS:
                 continue
 
+            # === TIMER ACTIVE MODE ===
+            # When timer is running, ONLY process timer-related commands (cancel/stop)
+            # All other features are blocked to prevent interference
+            if self.timer_running:
+                is_timer_query = any(w in clean_text for w in ["timer", "countdown", "focus", "stop", "cancel"])
+                if is_timer_query and any(w in clean_text for w in ["cancel", "stop", "quit", "terminate", "shut up", "stop it"]):
+                    self.last_keyword_trigger = time.time()
+                    self.timer_running = False
+                    try:
+                        self.safe_send(b"TIMER_CANCEL\n")
+                    except Exception:
+                        pass
+                    play_speech_on_laptop("Timer stopped.")
+                continue  # Skip all other features while timer is running
+
+            # === NORMAL MODE (no timer active) ===
+
             # Feature 1: Reminder List check
             has_target_word = any(w in clean_text for w in ["reminder", "reminders", "alarm", "alarms", "task", "tasks"])
             is_creation_intent = any(w in clean_text for w in ["set", "add", "create", "remind me", "remind me to"])
@@ -659,20 +676,12 @@ class VoiceAgentHandler:
                 self.play_greeting()
                 continue
 
-            # Feature 4: Timer check
+            # Feature 4: Timer start check (only when no timer is running)
             is_timer_query = any(w in clean_text for w in ["timer", "countdown", "focus"])
             if is_timer_query:
                 self.last_keyword_trigger = time.time()
                 if any(w in clean_text for w in ["cancel", "stop", "quit", "terminate", "shut up", "stop it"]):
-                    if self.timer_running:
-                        self.timer_running = False
-                        try:
-                            self.safe_send(b"TIMER_CANCEL\n")
-                        except Exception:
-                            pass
-                        play_speech_on_laptop("Timer stopped.")
-                    else:
-                        play_speech_on_laptop("No timer is currently running.")
+                    play_speech_on_laptop("No timer is currently running.")
                 else:
                     duration = parse_timer_duration(clean_text)
                     if duration is not None:
@@ -867,11 +876,23 @@ class VoiceAgentHandler:
                         self.recv_buffer = bytearray(after)
                         processing = True
                         continue
+                    
+                    # Try to extract TIMER_DONE (ESP32 notifies countdown completed)
+                    result = self._extract_command(self.recv_buffer, b"TIMER_DONE")
+                    if result:
+                        before, cmd_bytes, after = result
+                        if before:
+                            audio_chunks.append(bytes(before))
+                        self.timer_running = False
+                        print("[TIMER] Countdown completed on ESP32, timer_running reset")
+                        self.recv_buffer = bytearray(after)
+                        processing = True
+                        continue
                 
                 # Check if recv_buffer has a partial command marker at the tail
                 # that might be completed by the next recv() call
                 tail = bytes(self.recv_buffer)
-                partial_markers = [b"CMD:", b"___END___", b"LDR:"]
+                partial_markers = [b"CMD:", b"___END___", b"LDR:", b"TIMER_DONE"]
                 safe_len = len(tail)
                 for marker in partial_markers:
                     # Check if the tail ends with any prefix of a marker

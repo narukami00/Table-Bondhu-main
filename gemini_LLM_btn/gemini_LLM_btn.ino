@@ -267,10 +267,11 @@ void setAppState(AppState newState) {
     stateTimerMs = millis();
     needRedraw = true;
     
-    // Stop buzzer when leaving alarm state
-    if (oldState == STATE_ALARM) {
+    // Stop buzzer when leaving alarm or timer finished state
+    if (oldState == STATE_ALARM || oldState == STATE_TIMER_FINISHED) {
       ledcWriteTone(0, 0);
       buzzerActive = false;
+      alarmFlashState = false;
     }
 
     
@@ -279,10 +280,13 @@ void setAppState(AppState newState) {
       dissolveWipe(COLOR_BG);
     }
     
-    // Clear screen or bottom overlay area depending on state
+    // Clear screen depending on target state
     if (currentState == STATE_CLOCK) {
       tft.fillScreen(COLOR_BG);
       drawClockFace();
+    } else if (currentState == STATE_TIMER || currentState == STATE_TIMER_FINISHED || currentState == STATE_REMINDERS) {
+      // Full-screen states need a complete clear
+      tft.fillScreen(COLOR_BG);
     } else {
       tft.fillRect(0, 110, 128, 50, COLOR_BG);
     }
@@ -788,6 +792,9 @@ void updateAnimations() {
         buzzerStartMs = millis();
         ledcWriteTone(0, 1000);
         setAppState(STATE_TIMER_FINISHED);
+        // Notify server that timer completed
+        client.print("TIMER_DONE\n");
+        Serial.println("[TIMER] Countdown finished, buzzer activated");
       } else {
         needRedraw = true;
       }
@@ -1096,7 +1103,10 @@ void drawRemindersPage() {
 }
 
 void drawTimerPage() {
-  tft.fillScreen(COLOR_BG);
+  // Clear the content area (preserve border by only clearing inner region)
+  tft.fillRect(5, 5, 118, 150, COLOR_BG);
+  
+  // Borders
   tft.drawRect(2, 2, 124, 156, COLOR_BORDER);
   tft.drawRect(4, 4, 120, 152, COLOR_BG);
   
@@ -1213,21 +1223,39 @@ void loop() {
   bool buttonPressed = (digitalRead(BUTTON_PIN) == LOW);
 
   if (buttonPressed && !lastButtonState) {
-    // Button just pressed — clear greetingMode, start wave
-    greetingMode = false;
-    isRecording = true;
-    client.print("CMD:WOKE\n");
-    setAppState(STATE_WAVING_INTRO);
+    // Block button press during active timer/timer finished states
+    if (currentState == STATE_TIMER || currentState == STATE_TIMER_FINISHED) {
+      // Ignore button press during countdown
+    } else {
+      // Button just pressed — clear greetingMode, start wave
+      greetingMode = false;
+      isRecording = true;
+      client.print("CMD:WOKE\n");
+      setAppState(STATE_WAVING_INTRO);
+    }
   } 
   else if (!buttonPressed && lastButtonState) {
-    // Button just released — end recording
-    isRecording = false;
-    client.print("___END___\n");
+    // Button just released — end recording (only if we actually started recording)
+    if (isRecording) {
+      isRecording = false;
+      client.print("___END___\n");
+    }
   }
   lastButtonState = buttonPressed;
 
-  // BOOT button: paginate text or clear when no more pages
-  if (currentState == STATE_SPEAKING || currentState == STATE_ALARM || currentState == STATE_REMINDERS) {
+  // BOOT button: paginate text, dismiss timer/alarm, or clear when no more pages
+  if (currentState == STATE_TIMER || currentState == STATE_TIMER_FINISHED) {
+    // In timer states, BOOT button dismisses/cancels the timer
+    bool bootPressed = (digitalRead(BOOT_BTN) == LOW);
+    if (bootPressed && !lastBootBtnState) {
+      ledcWriteTone(0, 0);
+      buzzerActive = false;
+      timerSecondsLeft = 0;
+      setAppState(STATE_CLOCK);
+    }
+    lastBootBtnState = bootPressed;
+  }
+  else if (currentState == STATE_SPEAKING || currentState == STATE_ALARM || currentState == STATE_REMINDERS) {
     bool bootPressed = (digitalRead(BOOT_BTN) == LOW);
     if (bootPressed && !lastBootBtnState) {
       textPage++;
@@ -1249,9 +1277,10 @@ void loop() {
     lastBootBtnState = bootPressed;
   }
 
-  // Stream Audio continuously when in clock, idle, listening, or alarm states
+  // Stream Audio continuously when in clock, idle, listening, alarm, or timer states
+  // Timer states need audio for voice-based cancel commands
   // We use non-blocking I2S reading (timeout 0) so animations remain smooth
-  bool shouldStream = (currentState == STATE_CLOCK || currentState == STATE_IDLE || currentState == STATE_LISTENING || currentState == STATE_ALARM);
+  bool shouldStream = (currentState == STATE_CLOCK || currentState == STATE_IDLE || currentState == STATE_LISTENING || currentState == STATE_ALARM || currentState == STATE_TIMER || currentState == STATE_TIMER_FINISHED);
   size_t bytes_read = 0;
   
   static uint16_t raw_accumulator[512]; 
@@ -1305,7 +1334,16 @@ void loop() {
     response.trim(); 
     
     if (response.length() > 0) {
-      if (response.startsWith("CMD:WAKE") || response == "UI_STATE:LISTENING") {
+      // --- TIMER ACTIVE GUARD ---
+      // When timer is active, only accept TIMER_START, TIMER_CANCEL, TIMER_STOP, and WEATHER commands
+      bool timerActive = (currentState == STATE_TIMER || currentState == STATE_TIMER_FINISHED);
+      bool isTimerCmd = response.startsWith("TIMER_") || response.startsWith("WEATHER:");
+      
+      if (timerActive && !isTimerCmd) {
+        Serial.printf("[TIMER GUARD] Rejected command during timer: %s\n", response.c_str());
+        // Fall through to consume the command but don't act on it
+      }
+      else if (response.startsWith("CMD:WAKE") || response == "UI_STATE:LISTENING") {
         serverDuration = 0;
         setAppState(STATE_WAVING_INTRO);
       }
@@ -1320,7 +1358,10 @@ void loop() {
       }
       else if (response == "UI_STATE:IDLE") {
         serverDuration = 0;
-        setAppState(STATE_CLOCK);
+        // Guard: do NOT reset to clock if a timer is actively counting down or finished
+        if (currentState != STATE_TIMER && currentState != STATE_TIMER_FINISHED) {
+          setAppState(STATE_CLOCK);
+        }
       }
       else if (response.startsWith("TIMER_START:")) {
         timerSecondsLeft = response.substring(12).toInt();
