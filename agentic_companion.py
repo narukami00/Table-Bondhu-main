@@ -1037,13 +1037,14 @@ class VoiceAgentHandler:
                     except Exception:
                         pass
                     play_speech_on_laptop(f"Starting countdown for {format_duration(duration)}.")
+                    self.is_awake = False
                 else:
                     play_speech_on_laptop("Please specify seconds, minutes, or hours.")
-                self.is_awake = False
-                try:
-                    self.safe_send(b"UI_STATE:IDLE\n")
-                except Exception:
-                    pass
+                    self.is_awake = False
+                    try:
+                        self.safe_send(b"UI_STATE:IDLE\n")
+                    except Exception:
+                        pass
                 return
 
             # --- LLM PROCESSING ---

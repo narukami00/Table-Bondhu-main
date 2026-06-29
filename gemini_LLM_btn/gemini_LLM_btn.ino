@@ -1325,6 +1325,7 @@ void loop() {
       else if (response.startsWith("TIMER_START:")) {
         timerSecondsLeft = response.substring(12).toInt();
         lastTimerTickMs = millis();
+        Serial.printf("[TIMER] Starting countdown: %d seconds\n", timerSecondsLeft);
         setAppState(STATE_TIMER);
       }
       else if (response == "TIMER_CANCEL" || response == "TIMER_STOP") {
