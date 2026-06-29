@@ -1022,7 +1022,30 @@ class VoiceAgentHandler:
                     self.is_awake = False
                     self.safe_send(b"UI_STATE:IDLE\n")
                     return
+            # --- TIMER SETUP CHECK (BUTTON PRESS MODE) ---
+            clean_text = re.sub(r'[^\w\s]', '', text.lower()).strip()
+            is_timer_query = any(w in clean_text for w in ["timer", "countdown", "focus"])
+            is_stop_intent = any(w in clean_text for w in ["stop", "cancel", "quit", "dismiss", "terminate", "shut up", "stop it"])
             
+            if is_timer_query and not is_stop_intent:
+                # Intercept normal timer setup
+                duration = parse_timer_duration(clean_text)
+                if duration is not None:
+                    self.timer_running = True
+                    try:
+                        self.safe_send(f"TIMER_START:{duration}\n".encode())
+                    except Exception:
+                        pass
+                    play_speech_on_laptop(f"Starting countdown for {format_duration(duration)}.")
+                else:
+                    play_speech_on_laptop("Please specify seconds, minutes, or hours.")
+                self.is_awake = False
+                try:
+                    self.safe_send(b"UI_STATE:IDLE\n")
+                except Exception:
+                    pass
+                return
+
             # --- LLM PROCESSING ---
             print(f"[*] Processing user prompt: '{text}'")
             self.safe_send(b"UI_STATE:THINKING\n")
