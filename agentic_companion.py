@@ -397,17 +397,19 @@ def fetch_and_send_weather(conn):
             print(f"[Weather] Failed to send weather: {e}")
 
 def parse_timer_duration(text):
-    match = re.search(r'(\d+)\s*(second|sec|minute|min|hour|hr|s|m|h)s?', text.lower())
-    if match:
-        val = int(match.group(1))
-        unit = match.group(2)
+    matches = re.findall(r'(\d+)\s*(second|sec|minute|min|hour|hr|s|m|h)s?', text.lower())
+    if not matches:
+        return None
+    total_seconds = 0
+    for val_str, unit in matches:
+        val = int(val_str)
         if unit.startswith('s'):
-            return val
+            total_seconds += val
         elif unit.startswith('m'):
-            return val * 60
-        elif unit.startswith('h'):
-            return val * 3600
-    return None
+            total_seconds += val * 60
+        elif unit.startswith('h') or unit.startswith('hr'):
+            total_seconds += val * 3600
+    return total_seconds if total_seconds > 0 else None
 
 def format_duration(seconds):
     if seconds < 60:
@@ -616,11 +618,20 @@ class VoiceAgentHandler:
                 continue
 
             # === TIMER ACTIVE MODE ===
-            # When timer is running, ONLY process timer-related commands (cancel/stop)
+            # When timer is running, ONLY process timer-related commands (cancel/stop, pause, resume)
             # All other features are blocked to prevent interference
             if self.timer_running:
-                is_timer_query = any(w in clean_text for w in ["timer", "countdown", "focus", "stop", "cancel"])
-                if is_timer_query and any(w in clean_text for w in ["cancel", "stop", "quit", "terminate", "shut up", "stop it"]):
+                # 1. Check Cancel/Stop Intent
+                is_cancel = any(w in clean_text for w in ["cancel", "delete", "remove", "dismiss"]) or \
+                            (any(w in clean_text for w in ["stop", "quit", "terminate", "shut up", "stop it"]) and "timer" in clean_text)
+                
+                # 2. Check Pause Intent
+                is_pause = any(w in clean_text for w in ["pause", "hold"])
+                
+                # 3. Check Resume Intent
+                is_resume = any(w in clean_text for w in ["resume", "continue", "start", "play"])
+                
+                if is_cancel:
                     self.last_keyword_trigger = time.time()
                     self.timer_running = False
                     try:
@@ -628,6 +639,20 @@ class VoiceAgentHandler:
                     except Exception:
                         pass
                     play_speech_on_laptop("Timer stopped.")
+                elif is_pause:
+                    self.last_keyword_trigger = time.time()
+                    try:
+                        self.safe_send(b"TIMER_PAUSE\n")
+                    except Exception:
+                        pass
+                    play_speech_on_laptop("Timer paused.")
+                elif is_resume:
+                    self.last_keyword_trigger = time.time()
+                    try:
+                        self.safe_send(b"TIMER_RESUME\n")
+                    except Exception:
+                        pass
+                    play_speech_on_laptop("Timer resumed.")
                 continue  # Skip all other features while timer is running
 
             # === NORMAL MODE (no timer active) ===
@@ -1009,25 +1034,34 @@ class VoiceAgentHandler:
             # --- TIMER RUNNING BLOCK ---
             if self.timer_running:
                 clean_text = re.sub(r'[^\w\s]', '', text.lower()).strip()
-                if any(word in clean_text for word in ["stop", "cancel", "quit", "dismiss", "terminate", "shut up", "stop it"]):
+                is_cancel = any(w in clean_text for w in ["cancel", "delete", "remove", "dismiss"]) or \
+                            (any(w in clean_text for w in ["stop", "quit", "terminate", "shut up", "stop it"]) and "timer" in clean_text)
+                is_pause = any(w in clean_text for w in ["pause", "hold"])
+                is_resume = any(w in clean_text for w in ["resume", "continue", "start", "play"])
+
+                if is_cancel:
                     self.timer_running = False
                     try:
                         self.safe_send(b"TIMER_CANCEL\n")
                     except Exception:
                         pass
                     play_speech_on_laptop("Timer stopped.")
-                    self.is_awake = False
+                elif is_pause:
                     try:
-                        self.safe_send(b"UI_STATE:IDLE\n")
+                        self.safe_send(b"TIMER_PAUSE\n")
                     except Exception:
                         pass
+                    play_speech_on_laptop("Timer paused.")
+                elif is_resume:
+                    try:
+                        self.safe_send(b"TIMER_RESUME\n")
+                    except Exception:
+                        pass
+                    play_speech_on_laptop("Timer resumed.")
                 else:
                     play_speech_on_laptop("Countdown is active. Say stop timer to cancel.")
-                    self.is_awake = False
-                    try:
-                        self.safe_send(b"UI_STATE:IDLE\n")
-                    except Exception:
-                        pass
+                
+                self.is_awake = False
                 return
 
             # --- ALARM DISMISSAL CHECK ---

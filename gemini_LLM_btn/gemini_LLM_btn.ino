@@ -78,6 +78,8 @@ bool hasWeather = false;
 // Timer / Countdown variables
 int timerSecondsLeft = 0;
 unsigned long lastTimerTickMs = 0;
+unsigned long buttonPressStartMs = 0;
+bool buttonHeldProcessed = false;
 
 // Redraw control
 bool needRedraw = true;
@@ -103,6 +105,7 @@ enum AppState {
   STATE_ALARM,
   STATE_REMINDERS,
   STATE_TIMER,
+  STATE_TIMER_PAUSED,
   STATE_TIMER_FINISHED
 };
 
@@ -284,7 +287,7 @@ void setAppState(AppState newState) {
     if (currentState == STATE_CLOCK) {
       tft.fillScreen(COLOR_BG);
       drawClockFace();
-    } else if (currentState == STATE_TIMER || currentState == STATE_TIMER_FINISHED || currentState == STATE_REMINDERS) {
+    } else if (currentState == STATE_TIMER || currentState == STATE_TIMER_PAUSED || currentState == STATE_TIMER_FINISHED || currentState == STATE_REMINDERS) {
       // Full-screen states need a complete clear
       tft.fillScreen(COLOR_BG);
     } else {
@@ -319,7 +322,7 @@ void setAppState(AppState newState) {
       bubbleLineCount = 0;  // Force re-pagination
       textPage = 0;
       drawRemindersPage();
-    } else if (currentState == STATE_TIMER) {
+    } else if (currentState == STATE_TIMER || currentState == STATE_TIMER_PAUSED) {
       drawTimerPage();
     } else if (currentState == STATE_TIMER_FINISHED) {
       shakeX = 0;
@@ -833,7 +836,7 @@ void updateAnimations() {
   if (needRedraw) {
     if (currentState == STATE_REMINDERS) {
       drawRemindersPage();
-    } else if (currentState == STATE_TIMER) {
+    } else if (currentState == STATE_TIMER || currentState == STATE_TIMER_PAUSED) {
       drawTimerPage();
     } else {
       drawAvatar();
@@ -1129,22 +1132,37 @@ void drawTimerPage() {
     snprintf(timeBuffer, sizeof(timeBuffer), "%02d:%02d", m, s);
   }
   
-  // Large timer text
+  // Large timer text with dynamic sizing to prevent overflow
   tft.setTextColor(COLOR_TEXT, COLOR_BG);
-  tft.setTextSize(3);
-  int textW = strlen(timeBuffer) * 18;
-  tft.setCursor((128 - textW) / 2, 60);
+  int textSize = (h > 0) ? 2 : 3;
+  tft.setTextSize(textSize);
+  int charWidth = (textSize == 2) ? 12 : 18;
+  int textW = strlen(timeBuffer) * charWidth;
+  int cursorY = (textSize == 2) ? 68 : 62;
+  tft.setCursor((128 - textW) / 2, cursorY);
   tft.print(timeBuffer);
   
-  // Focus text at bottom
-  tft.setTextColor(COLOR_STATUS, COLOR_BG);
+  // Instructions & Status Info
   tft.setTextSize(1);
-  tft.setCursor(20, 110);
-  tft.print("STAY FOCUSED!");
+  tft.drawRoundRect(10, 124, 108, 24, 4, COLOR_BORDER);
   
-  tft.drawRoundRect(10, 128, 108, 20, 4, COLOR_BORDER);
-  tft.setCursor(22, 134);
-  tft.print("SAY: CANCEL TIMER");
+  if (currentState == STATE_TIMER_PAUSED) {
+    tft.setTextColor(COLOR_ACCENT, COLOR_BG);
+    tft.setCursor((128 - (12 * 6)) / 2, 105);
+    tft.print("** PAUSED **");
+    
+    tft.setTextColor(COLOR_STATUS, COLOR_BG);
+    tft.setCursor((128 - (15 * 6)) / 2, 132);
+    tft.print("CLICK TO RESUME");
+  } else {
+    tft.setTextColor(COLOR_STATUS, COLOR_BG);
+    tft.setCursor((128 - (16 * 6)) / 2, 105);
+    tft.print("[ CLICK: PAUSE ]");
+    
+    tft.setTextColor(COLOR_STATUS, COLOR_BG);
+    tft.setCursor((128 - (14 * 6)) / 2, 132);
+    tft.print("HOLD TO CANCEL");
+  }
 }
 
 
@@ -1219,38 +1237,87 @@ void loop() {
     setAppState(STATE_CLOCK);
   }
 
-  // Check Button State for manual wake up (edge detection)
+  // Check Button State for manual wake up or timer pause/cancel (edge and hold detection)
   bool buttonPressed = (digitalRead(BUTTON_PIN) == LOW);
 
+  // 1. Detect Button Press (Edge LOW)
   if (buttonPressed && !lastButtonState) {
-    // Block button press during active timer/timer finished states
-    if (currentState == STATE_TIMER || currentState == STATE_TIMER_FINISHED) {
-      // Ignore button press during countdown
-    } else {
-      // Button just pressed — clear greetingMode, start wave
+    buttonPressStartMs = millis();
+    buttonHeldProcessed = false;
+    
+    // For normal flow, CMD:WOKE is sent immediately if not in timer states
+    if (currentState != STATE_TIMER && currentState != STATE_TIMER_PAUSED && currentState != STATE_TIMER_FINISHED) {
       greetingMode = false;
       isRecording = true;
       client.print("CMD:WOKE\n");
       setAppState(STATE_WAVING_INTRO);
     }
-  } 
-  else if (!buttonPressed && lastButtonState) {
-    // Button just released — end recording (only if we actually started recording)
+  }
+  
+  // 2. Detect Button Hold (Active Timer, Paused Timer, or Finished Timer states only)
+  if (buttonPressed && lastButtonState && !buttonHeldProcessed) {
+    if (currentState == STATE_TIMER || currentState == STATE_TIMER_PAUSED || currentState == STATE_TIMER_FINISHED) {
+      if (millis() - buttonPressStartMs > 1000) {  // 1.0 second hold
+        buttonHeldProcessed = true;
+        
+        // Long Press -> Cancel Timer
+        ledcWriteTone(0, 0);
+        buzzerActive = false;
+        timerSecondsLeft = 0;
+        
+        // Notify Python server so timer_running gets set to False
+        client.print("TIMER_DONE\n"); 
+        
+        setAppState(STATE_CLOCK);
+        Serial.println("[TIMER] Long press: timer cancelled");
+      }
+    }
+  }
+  
+  // 3. Detect Button Release (Edge HIGH)
+  if (!buttonPressed && lastButtonState) {
+    // Normal recording flow release
     if (isRecording) {
       isRecording = false;
       client.print("___END___\n");
     }
+    // Timer state release (Short Press -> Toggle Pause/Resume or Dismiss Alarm)
+    else if (!buttonHeldProcessed) {
+      if (currentState == STATE_TIMER) {
+        // Pause timer
+        setAppState(STATE_TIMER_PAUSED);
+        Serial.println("[TIMER] Short press: paused");
+      }
+      else if (currentState == STATE_TIMER_PAUSED) {
+        // Resume timer
+        lastTimerTickMs = millis(); // Reset tick timestamp to avoid instant decrement
+        setAppState(STATE_TIMER);
+        Serial.println("[TIMER] Short press: resumed");
+      }
+      else if (currentState == STATE_TIMER_FINISHED) {
+        // Dismiss completed alarm
+        ledcWriteTone(0, 0);
+        buzzerActive = false;
+        setAppState(STATE_CLOCK);
+        Serial.println("[TIMER] Short press: completed alarm dismissed");
+      }
+    }
+    buttonHeldProcessed = false;
   }
   lastButtonState = buttonPressed;
 
   // BOOT button: paginate text, dismiss timer/alarm, or clear when no more pages
-  if (currentState == STATE_TIMER || currentState == STATE_TIMER_FINISHED) {
+  if (currentState == STATE_TIMER || currentState == STATE_TIMER_PAUSED || currentState == STATE_TIMER_FINISHED) {
     // In timer states, BOOT button dismisses/cancels the timer
     bool bootPressed = (digitalRead(BOOT_BTN) == LOW);
     if (bootPressed && !lastBootBtnState) {
       ledcWriteTone(0, 0);
       buzzerActive = false;
       timerSecondsLeft = 0;
+      
+      // Notify Python server so timer_running gets set to False
+      client.print("TIMER_DONE\n");
+      
       setAppState(STATE_CLOCK);
     }
     lastBootBtnState = bootPressed;
@@ -1280,7 +1347,7 @@ void loop() {
   // Stream Audio continuously when in clock, idle, listening, alarm, or timer states
   // Timer states need audio for voice-based cancel commands
   // We use non-blocking I2S reading (timeout 0) so animations remain smooth
-  bool shouldStream = (currentState == STATE_CLOCK || currentState == STATE_IDLE || currentState == STATE_LISTENING || currentState == STATE_ALARM || currentState == STATE_TIMER || currentState == STATE_TIMER_FINISHED);
+  bool shouldStream = (currentState == STATE_CLOCK || currentState == STATE_IDLE || currentState == STATE_LISTENING || currentState == STATE_ALARM || currentState == STATE_TIMER || currentState == STATE_TIMER_PAUSED || currentState == STATE_TIMER_FINISHED);
   size_t bytes_read = 0;
   
   static uint16_t raw_accumulator[512]; 
@@ -1335,8 +1402,8 @@ void loop() {
     
     if (response.length() > 0) {
       // --- TIMER ACTIVE GUARD ---
-      // When timer is active, only accept TIMER_START, TIMER_CANCEL, TIMER_STOP, and WEATHER commands
-      bool timerActive = (currentState == STATE_TIMER || currentState == STATE_TIMER_FINISHED);
+      // When timer is active, only accept TIMER_START, TIMER_CANCEL, TIMER_STOP, TIMER_PAUSE, TIMER_RESUME, and WEATHER commands
+      bool timerActive = (currentState == STATE_TIMER || currentState == STATE_TIMER_PAUSED || currentState == STATE_TIMER_FINISHED);
       bool isTimerCmd = response.startsWith("TIMER_") || response.startsWith("WEATHER:");
       
       if (timerActive && !isTimerCmd) {
@@ -1358,8 +1425,8 @@ void loop() {
       }
       else if (response == "UI_STATE:IDLE") {
         serverDuration = 0;
-        // Guard: do NOT reset to clock if a timer is actively counting down or finished
-        if (currentState != STATE_TIMER && currentState != STATE_TIMER_FINISHED) {
+        // Guard: do NOT reset to clock if a timer is actively counting down, paused, or finished
+        if (currentState != STATE_TIMER && currentState != STATE_TIMER_PAUSED && currentState != STATE_TIMER_FINISHED) {
           setAppState(STATE_CLOCK);
         }
       }
@@ -1368,6 +1435,15 @@ void loop() {
         lastTimerTickMs = millis();
         Serial.printf("[TIMER] Starting countdown: %d seconds\n", timerSecondsLeft);
         setAppState(STATE_TIMER);
+      }
+      else if (response == "TIMER_PAUSE") {
+        setAppState(STATE_TIMER_PAUSED);
+        Serial.println("[TIMER] Paused via server command");
+      }
+      else if (response == "TIMER_RESUME") {
+        lastTimerTickMs = millis();
+        setAppState(STATE_TIMER);
+        Serial.println("[TIMER] Resumed via server command");
       }
       else if (response == "TIMER_CANCEL" || response == "TIMER_STOP") {
         ledcWriteTone(0, 0);
