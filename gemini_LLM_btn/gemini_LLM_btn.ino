@@ -80,6 +80,7 @@ int timerSecondsLeft = 0;
 unsigned long lastTimerTickMs = 0;
 unsigned long buttonPressStartMs = 0;
 bool buttonHeldProcessed = false;
+unsigned long lastServerConnectAttemptMs = 0;
 
 // Redraw control
 bool needRedraw = true;
@@ -466,12 +467,14 @@ void dissolveWipe(uint16_t targetColor) {
 void drawClockFace() {
   struct tm timeinfo;
   if (!getLocalTime(&timeinfo, 100)) {
-    // Retry NTP periodically
-    unsigned long now = millis();
-    if (now - lastNtpRetryMs > NTP_RETRY_INTERVAL_MS) {
-      configTime(gmtOffset_sec, daylightOffset_sec, "pool.ntp.org", "time.google.com", "time.nist.gov");
-      lastNtpRetryMs = now;
-      Serial.println("[NTP] Retrying time sync...");
+    // Retry NTP periodically only if WiFi is actually connected
+    if (WiFi.status() == WL_CONNECTED) {
+      unsigned long now = millis();
+      if (now - lastNtpRetryMs > NTP_RETRY_INTERVAL_MS) {
+        configTime(gmtOffset_sec, daylightOffset_sec, "pool.ntp.org", "time.google.com", "time.nist.gov");
+        lastNtpRetryMs = now;
+        Serial.println("[NTP] Retrying time sync...");
+      }
     }
 
     // Custom HUD Border Outline
@@ -480,14 +483,24 @@ void drawClockFace() {
 
     tft.setTextColor(COLOR_ACCENT, COLOR_BG);
     tft.setTextSize(1);
-    tft.setCursor(24, 55);
-    tft.println("Syncing Time...");
+    if (WiFi.status() != WL_CONNECTED) {
+      tft.setCursor(16, 55);
+      tft.println("Offline Mode");
+    } else {
+      tft.setCursor(24, 55);
+      tft.println("Syncing Time...");
+    }
 
     tft.drawRoundRect(10, 115, 108, 30, 4, COLOR_BORDER);
     tft.setTextColor(COLOR_STATUS, COLOR_BG);
     tft.setTextSize(1);
-    tft.setCursor(20, 126);
-    tft.println("SYSTEM READY");
+    if (WiFi.status() != WL_CONNECTED || !client.connected()) {
+      tft.setCursor(28, 126);
+      tft.println("DISCONNECTED");
+    } else {
+      tft.setCursor(28, 126);
+      tft.println("SYSTEM READY");
+    }
     return;
   }
   
@@ -518,6 +531,12 @@ void drawClockFace() {
     tft.setTextSize(1);
     tft.setCursor(38, 11);
     tft.printf("%dC %s", weatherTemp, weatherDesc.c_str());
+  } else {
+    // Fallback text when offline
+    tft.setTextColor(COLOR_ACCENT, COLOR_BG);
+    tft.setTextSize(1);
+    tft.setCursor(16, 11);
+    tft.print("HAVE A GOOD DAY!");
   }
   
   // Clear "Syncing Time..." area from previous failed NTP attempt
@@ -557,8 +576,13 @@ void drawClockFace() {
   tft.drawRoundRect(10, 115, 108, 30, 4, COLOR_BORDER);
   tft.setTextColor(COLOR_STATUS, COLOR_BG);
   tft.setTextSize(1);
-  tft.setCursor(20, 126);
-  tft.println("SYSTEM READY");
+  if (WiFi.status() != WL_CONNECTED || !client.connected()) {
+    tft.setCursor(28, 126);
+    tft.println("DISCONNECTED");
+  } else {
+    tft.setCursor(28, 126);
+    tft.println("SYSTEM READY");
+  }
 }
 
 void drawIdleOverlay() {
@@ -594,8 +618,13 @@ void drawIdleOverlay() {
   
   tft.setTextColor(COLOR_STATUS, COLOR_BUBBLE_BG);
   tft.setTextSize(1);
-  tft.setCursor(26, 138);
-  tft.print("SYSTEM READY");
+  if (WiFi.status() != WL_CONNECTED || !client.connected()) {
+    tft.setCursor(28, 138);
+    tft.print("DISCONNECTED");
+  } else {
+    tft.setCursor(28, 138);
+    tft.print("SYSTEM READY");
+  }
 }
 
 void updateAnimations() {
@@ -616,7 +645,9 @@ void updateAnimations() {
       cachedLdr = analogRead(LDR_PIN);
       i2s_adc_enable(I2S_NUM_0);
       i2s_start(I2S_NUM_0);
-      client.print("LDR:" + String(cachedLdr) + "\n");
+      if (client.connected()) {
+        client.print("LDR:" + String(cachedLdr) + "\n");
+      }
       
       int detectedTheme = ldrToTheme(cachedLdr);
       if (detectedTheme != activeTheme
@@ -796,7 +827,9 @@ void updateAnimations() {
         ledcWriteTone(0, 1000);
         setAppState(STATE_TIMER_FINISHED);
         // Notify server that timer completed
-        client.print("TIMER_DONE\n");
+        if (client.connected()) {
+          client.print("TIMER_DONE\n");
+        }
         Serial.println("[TIMER] Countdown finished, buzzer activated");
       } else {
         needRedraw = true;
@@ -1203,15 +1236,22 @@ void setup() {
   }
 
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-  while (WiFi.status() != WL_CONNECTED) {
+  int connAttempts = 0;
+  Serial.print("Connecting to WiFi");
+  while (WiFi.status() != WL_CONNECTED && connAttempts < 10) {
     delay(500);
     Serial.print(".");
+    connAttempts++;
   }
   Serial.println("");
-  Serial.print("WiFi Connected! IP Address: ");
-  Serial.println(WiFi.localIP());
-
-  configTime(gmtOffset_sec, daylightOffset_sec, "pool.ntp.org", "time.google.com", "time.nist.gov");
+  
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.print("WiFi Connected! IP Address: ");
+    Serial.println(WiFi.localIP());
+    configTime(gmtOffset_sec, daylightOffset_sec, "pool.ntp.org", "time.google.com", "time.nist.gov");
+  } else {
+    Serial.println("WiFi Connection Failed. Starting in Offline Mode.");
+  }
 
   client.setTimeout(2);
   setupI2S();
@@ -1228,13 +1268,22 @@ void loop() {
   updateAnimations();
 
   if (!client.connected()) {
-    if (!client.connect(SERVER_IP, SERVER_PORT)) {
-      Serial.println("Connection failed...");
-      delay(2000);
-      return;
+    unsigned long now = millis();
+    if (now - lastServerConnectAttemptMs > 10000) { // Try connecting every 10 seconds
+      lastServerConnectAttemptMs = now;
+      if (WiFi.status() == WL_CONNECTED) {
+        Serial.println("Attempting connection to companion server...");
+        if (client.connect(SERVER_IP, SERVER_PORT)) {
+          client.setNoDelay(true);
+          Serial.println("Connected to server successfully!");
+          setAppState(STATE_CLOCK);
+        } else {
+          Serial.println("Connection to server failed. Retrying in 10s...");
+        }
+      } else {
+        Serial.println("WiFi not connected. Skipping server connection attempt.");
+      }
     }
-    client.setNoDelay(true); 
-    setAppState(STATE_CLOCK);
   }
 
   // Check Button State for manual wake up or timer pause/cancel (edge and hold detection)
@@ -1249,7 +1298,9 @@ void loop() {
     if (currentState != STATE_TIMER && currentState != STATE_TIMER_PAUSED && currentState != STATE_TIMER_FINISHED) {
       greetingMode = false;
       isRecording = true;
-      client.print("CMD:WOKE\n");
+      if (client.connected()) {
+        client.print("CMD:WOKE\n");
+      }
       setAppState(STATE_WAVING_INTRO);
     }
   }
@@ -1266,7 +1317,9 @@ void loop() {
         timerSecondsLeft = 0;
         
         // Notify Python server so timer_running gets set to False
-        client.print("TIMER_DONE\n"); 
+        if (client.connected()) {
+          client.print("TIMER_DONE\n"); 
+        }
         
         setAppState(STATE_CLOCK);
         Serial.println("[TIMER] Long press: timer cancelled");
@@ -1279,7 +1332,9 @@ void loop() {
     // Normal recording flow release
     if (isRecording) {
       isRecording = false;
-      client.print("___END___\n");
+      if (client.connected()) {
+        client.print("___END___\n");
+      }
     }
     // Timer state release (Short Press -> Toggle Pause/Resume or Dismiss Alarm)
     else if (!buttonHeldProcessed) {
@@ -1316,7 +1371,9 @@ void loop() {
       timerSecondsLeft = 0;
       
       // Notify Python server so timer_running gets set to False
-      client.print("TIMER_DONE\n");
+      if (client.connected()) {
+        client.print("TIMER_DONE\n");
+      }
       
       setAppState(STATE_CLOCK);
     }
@@ -1381,7 +1438,9 @@ void loop() {
             pcm_buffer[pcm_index++] = (int16_t)scaled_audio;
           }
           
-          client.write((const uint8_t*)pcm_buffer, pcm_index * 2);
+          if (client.connected()) {
+            client.write((const uint8_t*)pcm_buffer, pcm_index * 2);
+          }
           raw_accum_index = 0;
         }
       }

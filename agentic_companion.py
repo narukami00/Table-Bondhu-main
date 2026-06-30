@@ -166,11 +166,17 @@ def play_speech_on_laptop(text):
         # Resample to standard 44.1kHz rate so the audio interface plays it back correctly
         pitched_sound = pitched_sound.set_frame_rate(44100)
         
+        # Calculate new duration (before adding silence so avatar mouth stops exactly when speech ends)
+        duration_sec = len(pitched_sound.raw_data) / (pitched_sound.frame_rate * pitched_sound.channels * pitched_sound.sample_width)
+        
+        # Add 1 second of silence to prevent abrupt winsound truncation at the tail
+        silence = AudioSegment.silent(duration=1000, frame_rate=44100)
+        if pitched_sound.channels != silence.channels:
+            silence = silence.set_channels(pitched_sound.channels)
+        pitched_sound = pitched_sound + silence
+        
         temp_wav = "temp_tts_playback.wav"
         pitched_sound.export(temp_wav, format="wav")
-        
-        # Calculate new duration
-        duration_sec = len(pitched_sound.raw_data) / (pitched_sound.frame_rate * pitched_sound.channels * pitched_sound.sample_width)
         
         # Play asynchronously using winsound
         print(f"[TTS Pikachu] Playing asynchronously: '{text}' ({duration_sec:.1f}s)")
