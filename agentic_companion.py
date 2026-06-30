@@ -44,6 +44,7 @@ if not os.path.exists(RECORDINGS_DIR):
 active_conn = None
 active_alarm_active = False
 active_alarm_name = ""
+alarm_fired_at = None
 send_lock = threading.Lock()  # Prevents interleaved sends from multiple threads
 chat_lock = threading.Lock()  # Protects chat_session across threads
 
@@ -135,9 +136,10 @@ def play_alarm_sound():
         print(f"Failed to play alarm sound: {e}")
 
 def stop_active_alarm():
-    global active_alarm_active, active_alarm_name
+    global active_alarm_active, active_alarm_name, alarm_fired_at
     active_alarm_active = False
     active_alarm_name = ""
+    alarm_fired_at = None
     try:
         import winsound
         winsound.PlaySound(None, winsound.SND_PURGE)
@@ -430,9 +432,8 @@ def format_duration(seconds):
         return f"{h} hours and {m} minutes" if m > 0 else f"{h} hours"
 
 def alarm_scheduler():
-    global active_alarm_active, active_alarm_name, active_conn
+    global active_alarm_active, active_alarm_name, active_conn, alarm_fired_at
     print("[*] Alarm scheduler active.")
-    alarm_fired_at = None  # Track when the current alarm fired
     pending_alarms = []    # Alarms to send after releasing db_lock
     
     while True:
@@ -911,11 +912,20 @@ class VoiceAgentHandler:
                     # Try to extract TIMER_DONE (ESP32 notifies countdown completed)
                     result = self._extract_command(self.recv_buffer, b"TIMER_DONE")
                     if result:
+                        global active_alarm_active, active_alarm_name, alarm_fired_at
                         before, cmd_bytes, after = result
                         if before:
                             audio_chunks.append(bytes(before))
                         self.timer_running = False
                         print("[TIMER] Countdown completed on ESP32, timer_running reset")
+                        
+                        # Trigger alarm sound on laptop/desktop speaker just like reminders/alarms!
+                        active_alarm_active = True
+                        active_alarm_name = "Timer Finished"
+                        alarm_fired_at = datetime.datetime.now()
+                        play_alarm_sound()
+                        print("[TIMER] Playing completed alarm sound on laptop speaker...")
+                        
                         self.recv_buffer = bytearray(after)
                         processing = True
                         continue
