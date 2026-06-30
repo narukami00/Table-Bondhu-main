@@ -1058,12 +1058,12 @@ void paginateText(String text) {
 void drawBubbleText(String text) {
   // Anti-flicker: skip redraw if text unchanged
   if (text == lastBubbleText) return;
-  lastBubbleText = text;
   
-  // Paginate if needed
-  if (bubbleLineCount == 0) {
-    paginateText(text);
-  }
+  // Reset pagination for new text
+  bubbleLineCount = 0;
+  textPage = 0;
+  lastBubbleText = text;
+  paginateText(text);
   
   // Speech Bubble Rectangle
   tft.fillRoundRect(4, 110, 120, 46, 6, COLOR_BUBBLE_BG);
