@@ -68,6 +68,9 @@ You have the ability to manage reminders and alarms.
 - If the user says "remind me" or "set a reminder" but doesn't specify a task, use "Reminder" as the task.
 - To LIST reminders: [CMD:LIST_REMINDERS]
 - To CLEAR all: [CMD:CLEAR_REMINDERS]
+- To DELETE a specific reminder by its 1-based index from the active list: [CMD:DELETE_REMINDER|index]
+  Examples: "delete the second reminder" (from active list context) → "Deleted. [CMD:DELETE_REMINDER|2]"
+  "remove reminder number 1" → "Removed. [CMD:DELETE_REMINDER|1]"
 
 Do not explain the command tags to the user, just include them at the end of your response."""
 
@@ -81,10 +84,25 @@ class LocalChatSession:
             self.history.append({"role": "user", "content": user_text})
             messages = []
             if self.system_instruction:
-                # Inject current date and time dynamically
+                # Inject current date, time, and active reminders/tasks dynamically
                 now = datetime.datetime.now()
                 time_ctx = now.strftime("%A, %d %B %Y %I:%M %p")
-                sys_prompt = f"{self.system_instruction}\n\n[CONTEXT] The current time and date is: {time_ctx}. Use this context to answer questions about the current time or date concisely."
+                
+                active_rems = get_reminders_list()
+                rem_list_str = ""
+                if active_rems:
+                    for i, r in enumerate(active_rems, 1):
+                        rem_list_str += f"{i}. {r.get('task')} (scheduled for {r.get('display_time')})\n"
+                else:
+                    rem_list_str = "No active reminders/tasks."
+                
+                sys_prompt = (
+                    f"{self.system_instruction}\n\n"
+                    f"[CONTEXT]\n"
+                    f"- Current time/date: {time_ctx}\n"
+                    f"- Active reminders list:\n{rem_list_str}\n"
+                    f"Use this context to accurately answer queries about time, date, or reminders, and map deletion indexes correctly."
+                )
                 messages.append({"role": "system", "content": sys_prompt})
             messages.extend(self.history)
             
@@ -1148,6 +1166,7 @@ class VoiceAgentHandler:
     def handle_llm_response(self, ai_answer):
         # Scan for CMD tags - new format: [CMD:ADD_REMINDER|task|ABS|time] or [CMD:ADD_REMINDER|task|REL|30s]
         add_match = re.search(r'\[CMD:ADD_REMINDER\|([^|]+)\|(ABS|REL)\|([^\]]+)\]', ai_answer)
+        delete_match = re.search(r'\[CMD:DELETE_REMINDER\|(\d+)\]', ai_answer)
         list_match = '[CMD:LIST_REMINDERS]' in ai_answer
         clear_match = '[CMD:CLEAR_REMINDERS]' in ai_answer
         
@@ -1173,6 +1192,17 @@ class VoiceAgentHandler:
                 else:
                     self.safe_send(b"UI_MSG:Invalid time format.\n")
                 
+            elif delete_match:
+                index = int(delete_match.group(1).strip())
+                deleted_task = delete_reminder_by_index(index)
+                if deleted_task:
+                    header = f"UI_MSG:{clean_answer}\n".encode()
+                    speak_on_esp32(self.conn, clean_answer, header=header)
+                else:
+                    msg = "Reminder index not found."
+                    header = f"UI_MSG:{msg}\n".encode()
+                    speak_on_esp32(self.conn, msg, header=header)
+                    
             elif list_match:
                 self.send_reminder_list()
                     
