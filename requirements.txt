@@ -3,3 +3,4 @@ google-generativeai
 onnx-asr
 SpeechRecognition
 numpy
+sherpa-onnx

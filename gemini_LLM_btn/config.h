@@ -10,7 +10,7 @@ const char* WIFI_PASSWORD = "12345678";
 
 // Server Configuration
 // NOTE: Make sure to update SERVER_IP with your laptop's new IP address once connected to the hotspot!
-const char* SERVER_IP = "10.12.93.20"; // Update with current laptop IP
+const char* SERVER_IP = "10.25.55.20"; // Update with current laptop IP
 const int SERVER_PORT = 8080;
 
 // Alternative WiFi Configuration (uncomment to use)

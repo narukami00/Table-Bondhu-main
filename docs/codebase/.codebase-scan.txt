@@ -59,6 +59,14 @@ docs
 docs\API.md
 docs\codebase
 docs\codebase\.codebase-scan.txt
+docs\codebase\ARCHITECTURE.md
+docs\codebase\CONCERNS.md
+docs\codebase\CONVENTIONS.md
+docs\codebase\INTEGRATIONS.md
+docs\codebase\STACK.md
+docs\codebase\STRUCTURE.md
+docs\codebase\TESTING.md
+docs\docs.zip
 docs\README.md
 docs\STRUCTURE.md
 gemini_LLM.py
@@ -73,6 +81,8 @@ live_rec
 live_rec\config.h
 live_rec\live_rec.ino
 live_transcribe.py
+models
+models\gtcrn_simple.onnx
 Python
 Python\.gitignore
 Python\audio
@@ -190,16 +200,6 @@ recordings_analysis\rec_20260627_113227.wav
 recordings_analysis\rec_20260627_113454.wav
 recordings_analysis\rec_20260627_113549.wav
 recordings_analysis\rec_20260627_113649.wav
-recordings_analysis\rec_20260627_113914.wav
-recordings_analysis\rec_20260627_113927.wav
-recordings_analysis\rec_20260627_113942.wav
-recordings_analysis\rec_20260627_113955.wav
-recordings_analysis\rec_20260627_114003.wav
-recordings_analysis\rec_20260627_114020.wav
-recordings_analysis\rec_20260627_114310.wav
-recordings_analysis\rec_20260627_114358.wav
-recordings_analysis\rec_20260627_114529.wav
-recordings_analysis\rec_20260627_114844.wav
 
 === STACK DETECTION (manifest files) ===
 
@@ -209,6 +209,7 @@ google-generativeai
 onnx-asr
 SpeechRecognition
 numpy
+sherpa-onnx
 
 
 === ENTRY POINTS ===
@@ -224,6 +225,17 @@ No .env.example or .env.template found. Identify required environment variables 
 None found.
 
 === GIT RECENT COMMITS (last 20) ===
+976ef4c feat: instruct LLM to extract descriptive reminder topics/tasks rather than defaulting to generic names
+06d110a feat: enable LLM to delete specific reminders via natural language prompts
+02d70c7 fix: reset bubble text pagination caching when drawing new text
+3ab4dc6 feat: trigger winsound looping alarm on laptop speaker when countdown completes
+db51a1a feat: offline mode resilience, dynamic status HUD and winsound truncation fix
+ec863b3 feat: overhaul focus timer UI, add manual button control & multi-unit parser
+183e127 fix: comprehensive timer countdown overhaul - fix flickering, buzzer, state interference
+adcaef1 fix: prevent premature IDLE state reset on focus timer start
+4c67933 fix: intercept button-press timer queries before sending to LLM
+d6bad4a feat: implement weather HUD and local focus timer countdown
+3869288 stable: i2s_stop/start for LDR DMA resume, server audio handling fixed
 0e44c25 fix: ___END___ missing newline (stuck at listening), restore LDR TCP send (lost during refactor)
 b45d608 fix boot crash: conditional compilation for images.h (halves binary), re-add STATE_REMINDERS
 f3de5f6 fix boot crash: move themedBuf[32KB] from static RAM to heap malloc in setup()
@@ -233,53 +245,52 @@ bc000c8 fix 5 gaps: COLOR_ACCENT for clock/syncing, 15s LISTENING/THINKING timeo
 ab2704a add pushThemedImage: replace ASSET_BG with COLOR_BG for dynamic sprite backgrounds
 5c134b1 fix compile errors: move enum/tft before functions, make audioBuf volatile
 70085db fix all 5 issues: runtime colors, 12h clock+AM/PM, alarm auto-dismiss, text pagination+BOOT btn, LDR theme switching, serverDuration
-3553cfe baseline: current state before fixes
 
 === HIGH-CHURN FILES (last 90 days, top 20) ===
-  10 gemini_LLM_btn/gemini_LLM_btn.ino
+  17 gemini_LLM_btn/gemini_LLM_btn.ino
+  12 agentic_companion.py
+   2 reminders.json
    2 gemini_LLM_btn/images.h
-   2 agentic_companion.py
+   1 docs/codebase/.codebase-scan.txt
+   1 docs/codebase/ARCHITECTURE.md
+   1 docs/codebase/CONCERNS.md
+   1 docs/codebase/CONVENTIONS.md
+   1 docs/codebase/INTEGRATIONS.md
+   1 docs/codebase/STACK.md
+   1 docs/codebase/STRUCTURE.md
+   1 docs/codebase/TESTING.md
+   1 recordings_analysis/rec_20260628_220511.wav
+   1 recordings_analysis/rec_20260628_220554.wav
+   1 recordings_analysis/rec_20260628_220649.wav
    1 .gitignore
    1 .vscode/arduino.json
    1 .vscode/c_cpp_properties.json
    1 .vscode/extensions.json
    1 Arduino/config.h
-   1 Arduino/images/README.md
-   1 Arduino/images/images.h
-   1 Arduino/sketches/gemini_button/gemini_LLM_btn.ino
-   1 Arduino/sketches/live_rec/live_rec.ino
-   1 Arduino/sketches/save_recording/save_arduino.ino
-   1 Arduino/utils/display.h
-   1 Arduino/utils/i2s_setup.h
-   1 Arduino/utils/wifi.h
-   1 COMPANION_GUIDE.md
-   1 LICENSE
-   1 Python/.gitignore
-   1 Python/audio/__init__.py
 
 === MONOREPO SIGNALS ===
 No monorepo signals detected.
 
 === CODE METRICS ===
-Total files scanned: 222
-Total lines of code: 2454
+Total files scanned: 350
+Total lines of code: 2795
 
 Files by language:
-  Other: 190
+  Other: 318
   Python: 24
   C Header: 8
 
 Top 10 largest files:
 gemini_LLM_btn\images.h: 3413.2KB
+recordings_analysis\rec_20260630_174247.wav: 1094.0KB
 assets\Pikachu\eyes_open_mouth_open_60.png: 1090.0KB
 assets\girl\wave_1.png: 789.8KB
 assets\Pikachu\eyes_open_mouth_open_20.png: 759.1KB
 assets\Pikachu\peek_4.png: 746.2KB
 Screenshot 2026-05-28 020124.png: 734.7KB
+recordings_analysis\rec_20260630_172739.wav: 696.0KB
 assets\Pikachu\eyes_closed_mouth_open.png: 684.1KB
 assets\Pikachu\wave_2.png: 680.0KB
-recordings_analysis\rec_20260627_142457.wav: 557.5KB
-recordings_analysis\rec_20260627_093341.wav: 550.1KB
 
 === CI/CD PIPELINES ===
 No CI/CD pipelines detected.
