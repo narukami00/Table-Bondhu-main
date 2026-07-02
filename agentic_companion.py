@@ -27,7 +27,7 @@ PORT = 8080
 
 # Configure the LLM (LM Studio Local Endpoint)
 LM_STUDIO_URL = "http://127.0.0.1:1234/v1/chat/completions"
-MODEL_NAME = "google/gemma-4-e4b"
+MODEL_NAME = "qwen2.5-coder-1.5b-instruct"
 REMINDERS_FILE = "reminders.json"
 RECORDINGS_DIR = "recordings_analysis"
 COMMAND_TRIGGERS = ["reminder", "reminders", "hi", "hello", "hey", "yo"]
@@ -152,6 +152,29 @@ except Exception as e:
     speech_denoiser = None
     print(f"[Warning] Failed to load GTCRN Speech Denoiser: {e}")
 
+print("Loading Offline VITS Text-to-Speech...")
+try:
+    import sherpa_onnx
+    vits_config = sherpa_onnx.OfflineTtsVitsModelConfig(
+        model="models/vits-piper-en_US-amy-low/en_US-amy-low.onnx",
+        tokens="models/vits-piper-en_US-amy-low/tokens.txt",
+        data_dir="models/vits-piper-en_US-amy-low/espeak-ng-data"
+    )
+    model_config = sherpa_onnx.OfflineTtsModelConfig(
+        vits=vits_config,
+        num_threads=1,
+        provider="cpu"
+    )
+    tts_config = sherpa_onnx.OfflineTtsConfig(
+        model=model_config,
+        max_num_sentences=1
+    )
+    offline_tts = sherpa_onnx.OfflineTts(tts_config)
+    print("[*] Offline VITS Text-to-Speech loaded successfully.")
+except Exception as e:
+    offline_tts = None
+    print(f"[Warning] Failed to load Offline VITS Text-to-Speech: {e}")
+
 print("Initializing Local LLM Session...")
 chat_session = LocalChatSession(system_instruction=SYSTEM_INSTRUCTION)
 print("Systems Online! Ready to listen.")
@@ -191,14 +214,34 @@ def play_speech_on_laptop(text):
     """Play the synthesized speech on the laptop speakers using winsound, modulated to sound like Pikachu"""
     try:
         import winsound
-        # Generate speech audio
-        tts = gTTS(text=text, lang='en', slow=False)
-        mp3_buf = io.BytesIO()
-        tts.write_to_fp(mp3_buf)
-        mp3_buf.seek(0)
+        sound = None
         
-        # Load the audio segment
-        sound = AudioSegment.from_mp3(mp3_buf)
+        # Try offline VITS generation first
+        if offline_tts is not None:
+            try:
+                # Generate offline raw audio
+                audio = offline_tts.generate(text)
+                # Convert float32 array to 16-bit PCM bytes
+                audio_samples = np.array(audio.samples, dtype=np.float32)
+                int16_samples = (audio_samples * 32767.0).astype(np.int16)
+                raw_bytes = int16_samples.tobytes()
+                
+                sound = AudioSegment(
+                    data=raw_bytes,
+                    sample_width=2,
+                    frame_rate=audio.sample_rate,
+                    channels=1
+                )
+            except Exception as tts_err:
+                print(f"[Warning] Offline VITS generation failed, falling back to Google TTS: {tts_err}")
+        
+        # Fallback to Google TTS (requires internet) if offline TTS failed or is uninitialized
+        if sound is None:
+            tts = gTTS(text=text, lang='en', slow=False)
+            mp3_buf = io.BytesIO()
+            tts.write_to_fp(mp3_buf)
+            mp3_buf.seek(0)
+            sound = AudioSegment.from_mp3(mp3_buf)
         
         # --- PIKACHU VOICE EFFECT (PITCH & SPEED SHIFT) ---
         # Speed up and pitch up by 40% (creates a cute, high-pitched tone)
