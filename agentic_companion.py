@@ -132,25 +132,10 @@ asr_model = onnx_asr.load_model(
     quantization='int8'
 )
 
-print("Loading GTCRN Speech Denoiser...")
-try:
-    import sherpa_onnx
-    gtcrn_config = sherpa_onnx.OfflineSpeechDenoiserGtcrnModelConfig(
-        model="models/gtcrn_simple.onnx"
-    )
-    model_config = sherpa_onnx.OfflineSpeechDenoiserModelConfig(
-        gtcrn=gtcrn_config,
-        num_threads=1,
-        provider="cpu"
-    )
-    denoiser_config = sherpa_onnx.OfflineSpeechDenoiserConfig(
-        model=model_config
-    )
-    speech_denoiser = sherpa_onnx.OfflineSpeechDenoiser(denoiser_config)
-    print("[*] GTCRN Speech Denoiser loaded successfully.")
-except Exception as e:
-    speech_denoiser = None
-    print(f"[Warning] Failed to load GTCRN Speech Denoiser: {e}")
+# GTCRN Speech Denoiser is disabled because tiny neural enhancement models
+# introduce processing artifacts (spectral masking/phase distortion) on the
+# ESP32's raw 12-bit ADC audio, which degrades local ASR transcription accuracy.
+speech_denoiser = None
 
 print("Loading Offline VITS Text-to-Speech...")
 try:
@@ -1108,14 +1093,7 @@ class VoiceAgentHandler:
         except Exception as e:
             print(f"[Warning] Failed to save recording: {e}")
 
-        # --- SPEECH ENHANCEMENT / NOISE SUPPRESSION ---
-        if speech_denoiser is not None:
-            try:
-                print("[*] Enhancing audio via GTCRN Denoiser...")
-                denoised_audio = speech_denoiser.run(audio_float, 16000)
-                audio_float = np.array(denoised_audio.samples, dtype=np.float32)
-            except Exception as e:
-                print(f"[Warning] Speech enhancement failed: {e}")
+        # (Speech enhancement bypassed to prevent ASR degradation from model artifacts)
 
         try:
             text = asr_model.recognize(audio_float, sample_rate=16000).strip()
