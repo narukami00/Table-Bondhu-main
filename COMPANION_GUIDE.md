@@ -144,3 +144,36 @@ Ensure LM Studio is running with a model loaded.
 
 ### PIR keeps triggering / not triggering
 Adjust sensitivity and time delay potentiometers on the PIR board.
+
+## The Mobile Companion App
+
+The Table-Bondhu Android App is a Flutter-based control center that bridges communications between your phone, the ESP32 desk clock, and the Python LLM server.
+
+### 1. Wi-Fi Provisioning Bridge (AP Mode Setup)
+If the ESP32 cannot connect to your Wi-Fi or needs reconfiguring:
+1. Hold the **BOOT** button on the ESP32 during boot to force AP Mode. The display will show `AP Mode Active: Table-Bondhu-Config`.
+2. Connect your phone's Wi-Fi to the access point `Table-Bondhu-Config`.
+3. Open the Android app's **Connection** tab, fill in target Wi-Fi SSID, Password, and your PC's IP, and tap **Provision ESP32 Device**.
+4. The app pings a local endpoint on the ESP32 (`http://192.168.4.1/setup`) via a POST request. The ESP32 saves these credentials to non-volatile storage (NVS) and restarts automatically.
+
+### 2. Auto-Discovery & Persistent Server Binding
+* **Automatic Scanning:** The app runs a background UDP socket listener on port `9999` to intercept the Python server's broadcasts.
+* **Persistent Cache:** Discovered IPs are saved locally in the phone's filesystem (`saved_server_ip.txt`). The app automatically reads this on boot.
+* **Active Verification:** The app runs a background ping loop (every 4 seconds) to verify connection to the server REST API on port `8888` (`/api/ping`).
+* **Navigation Lock:** If the companion server is offline, the app stays on the Connection tab and locks access to other tabs (Chat, Reminders, Timer, Sleep Logs) to prevent unusable states, unlocking them instantly when a connection is restored.
+
+### 3. Messenger-Style Voice Chat (Push-to-Talk)
+* **Low-latency Listener:** A raw pointer listener on the microphone icon detects instant touch-down and touch-up events (bypassing the standard 500ms `onLongPress` delay).
+* **Base64 Audio Pipeline:** Finger touch records audio at `16000Hz` Mono PCM directly to a `.wav` file, converting it to Base64, and uploading it to `/api/voice_chat` on release.
+* **Short-Hold Filter:** Holds under `800ms` are treated as accidental taps. The app cancels the upload and prompts: `Hold to talk, release to send (tap is too short)`.
+
+### 4. Focus Timer Interceptor
+* If you send a timer request via the Chat tab (e.g. *"timer for 5 minutes"*), the server parses the request before hitting the LLM, triggering the ESP32 countdown display directly (`TIMER_START:duration`) instead of registering it as an alarm reminder.
+
+### 5. Sleep Monitoring & Target Bedtime Analytics
+* **Bedtime Selector:** Schedule target sleep times in the app. The server monitors LDR (light level) and PIR (movement) sensors. If it is dark and you are inactive around your target bedtime, it automatically starts sleep tracking.
+* **Tardiness Logging:** If you sleep past your scheduled time, the server logs the difference. A red alarm card appears on your log history showing: `Went to bed X minutes past target bedtime!`.
+* **Classification Rules:**
+  * `< 10 minutes`: Discarded from database logs.
+  * `10 minutes to 3 hours`: Classified as a **Nap** (marked with a sun icon).
+  * `> 3 hours`: Classified as a **Sleep** session (marked with a moon icon).
