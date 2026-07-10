@@ -6,6 +6,20 @@
 #include "soc/soc.h"
 #include "soc/rtc_cntl_reg.h"
 #include "config.h"
+#include <Preferences.h>
+#include <WebServer.h>
+#include <WiFiUdp.h>
+
+Preferences preferences;
+WebServer webServer(80);
+WiFiUDP udp;
+
+String activeSsid = "";
+String activePassword = "";
+String activeServerIp = "";
+bool isConfigMode = false;
+bool shouldReboot = false;
+unsigned long rebootTimerMs = 0;
 
 #define BUTTON_PIN 14 // Tactile Button (GND + D14)
 #define BOOT_BTN 0    // Built-in BOOT button for text pagination
@@ -1429,6 +1443,125 @@ void drawSleepSummaryPage() {
 
 
 
+void handleSetup() {
+  if (webServer.hasArg("ssid") && webServer.hasArg("password") && webServer.hasArg("server_ip")) {
+    String newSsid = webServer.arg("ssid");
+    String newPassword = webServer.arg("password");
+    String newServerIp = webServer.arg("server_ip");
+
+    preferences.begin("wifi-config", false);
+    preferences.putString("ssid", newSsid);
+    preferences.putString("password", newPassword);
+    preferences.putString("serverIp", newServerIp);
+    preferences.end();
+
+    webServer.send(200, "text/plain", "SUCCESS: Configuration saved. Restarting ESP32...");
+    
+    Serial.println("[Config] Saved new config via REST API:");
+    Serial.printf("SSID: %s, Server IP: %s\n", newSsid.c_str(), newServerIp.c_str());
+
+    shouldReboot = true;
+    rebootTimerMs = millis();
+  } else {
+    webServer.send(400, "text/plain", "ERROR: Missing parameters (ssid, password, server_ip)");
+  }
+}
+
+void handleStatus() {
+  String statusJson = "{\"status\":\"ConfigMode\",\"ssid\":\"" + activeSsid + "\",\"server_ip\":\"" + activeServerIp + "\"}";
+  webServer.send(200, "application/json", statusJson);
+}
+
+void startAPConfigMode() {
+  isConfigMode = true;
+  WiFi.disconnect(true);
+  WiFi.mode(WIFI_AP);
+  WiFi.softAP("Table-Bondhu-Config");
+  
+  Serial.println("[Config] Started Access Point 'Table-Bondhu-Config'");
+  Serial.print("[Config] AP IP Address: ");
+  Serial.println(WiFi.softAPIP());
+
+  // Set up TFT screen to show dynamic config instructions
+  tft.fillScreen(COLOR_BG);
+  tft.setTextColor(COLOR_TEXT, COLOR_BG);
+  
+  // Custom styled Configuration Screen Header
+  tft.fillRoundRect(5, 5, 118, 30, 4, COLOR_BUBBLE_BG);
+  tft.drawRoundRect(5, 5, 118, 30, 4, COLOR_BORDER);
+  tft.setTextSize(1);
+  tft.setTextColor(COLOR_ACCENT, COLOR_BUBBLE_BG);
+  tft.setCursor(18, 16);
+  tft.print("CONFIG PORTAL");
+
+  tft.setTextColor(COLOR_TEXT, COLOR_BG);
+  tft.setCursor(10, 45);
+  tft.print("1. Connect to WiFi:");
+  tft.setCursor(10, 60);
+  tft.setTextColor(COLOR_ACCENT, COLOR_BG);
+  tft.print("'Table-Bondhu-Config'");
+  
+  tft.setTextColor(COLOR_TEXT, COLOR_BG);
+  tft.setCursor(10, 85);
+  tft.print("2. Open Mobile App");
+  tft.setCursor(10, 100);
+  tft.print("   to configure.");
+
+  tft.setCursor(10, 125);
+  tft.setTextColor(COLOR_ACCENT, COLOR_BG);
+  tft.print("AP IP: 192.168.4.1");
+
+  webServer.on("/setup", HTTP_POST, handleSetup);
+  webServer.on("/status", HTTP_GET, handleStatus);
+  webServer.begin();
+  
+  Serial.println("[Config] Web server started on port 80");
+}
+
+void discoverServerIp() {
+  Serial.println("[Discovery] Listening for server UDP beacon on port 9999...");
+  udp.begin(9999);
+  unsigned long startSearchMs = millis();
+  bool found = false;
+
+  // Draw discovery notification on screen
+  tft.fillScreen(COLOR_BG);
+  tft.setTextColor(COLOR_TEXT, COLOR_BG);
+  tft.setTextSize(1);
+  tft.setCursor(10, 20);
+  tft.println("Syncing with");
+  tft.setCursor(10, 35);
+  tft.println("Companion Server...");
+  tft.setCursor(10, 60);
+  tft.setTextColor(COLOR_ACCENT, COLOR_BG);
+  tft.println("Scanning network...");
+
+  while (millis() - startSearchMs < 5000) { // Scan for max 5 seconds
+    int packetSize = udp.parsePacket();
+    if (packetSize) {
+      char packetBuffer[255];
+      int len = udp.read(packetBuffer, 255);
+      if (len > 0) {
+        packetBuffer[len] = 0;
+      }
+      String msg = String(packetBuffer);
+      if (msg.indexOf("TABLE_BONDHU_BEACON") >= 0) {
+        activeServerIp = udp.remoteIP().toString();
+        Serial.printf("[Discovery] Found server IP via UDP: %s\n", activeServerIp.c_str());
+        found = true;
+        break;
+      }
+    }
+    delay(50);
+  }
+
+  udp.stop();
+
+  if (!found) {
+    Serial.printf("[Discovery] No UDP beacon detected. Falling back to NVS server IP: %s\n", activeServerIp.c_str());
+  }
+}
+
 void setup() {
   WRITE_PERI_REG(RTC_CNTL_BROWN_OUT_REG, 0); // Disable brownout detector
   
@@ -1452,6 +1585,34 @@ void setup() {
   tft.init();
   tft.setRotation(2); // Rotate to Portrait 128x160
   tft.setSwapBytes(true);
+
+  // Check if button D14 is held on startup to force-reset WiFi
+  if (digitalRead(BUTTON_PIN) == LOW) {
+    tft.fillScreen(COLOR_BG);
+    tft.setTextColor(COLOR_TEXT, COLOR_BG);
+    tft.setCursor(10, 20);
+    tft.print("Keep holding to");
+    tft.setCursor(10, 35);
+    tft.print("reset WiFi...");
+    
+    delay(2000);
+    if (digitalRead(BUTTON_PIN) == LOW) {
+      Serial.println("[Config] Button held on boot. Clearing saved settings.");
+      preferences.begin("wifi-config", false);
+      preferences.clear();
+      preferences.end();
+      
+      startAPConfigMode();
+      return; // Skip standard setup since we are in config mode!
+    }
+  }
+
+  // Load configuration from NVS Preferences
+  preferences.begin("wifi-config", true);
+  activeSsid = preferences.getString("ssid", WIFI_SSID);
+  activePassword = preferences.getString("password", WIFI_PASSWORD);
+  activeServerIp = preferences.getString("serverIp", SERVER_IP);
+  preferences.end();
   
   // Create 128x110 Sprite
   faceSprite.createSprite(128, 110);
@@ -1470,10 +1631,12 @@ void setup() {
     while(1) delay(1000);
   }
 
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  WiFi.begin(activeSsid.c_str(), activePassword.c_str());
   int connAttempts = 0;
-  Serial.print("Connecting to WiFi");
-  while (WiFi.status() != WL_CONNECTED && connAttempts < 10) {
+  Serial.printf("Connecting to WiFi: %s", activeSsid.c_str());
+  tft.setCursor(10, 30);
+  tft.printf("SSID: %s", activeSsid.c_str());
+  while (WiFi.status() != WL_CONNECTED && connAttempts < 20) { // try for 10 seconds
     delay(500);
     Serial.print(".");
     connAttempts++;
@@ -1484,14 +1647,17 @@ void setup() {
     Serial.print("WiFi Connected! IP Address: ");
     Serial.println(WiFi.localIP());
     configTime(gmtOffset_sec, daylightOffset_sec, "pool.ntp.org", "time.google.com", "time.nist.gov");
+    
+    // Server IP auto-discovery via UDP beacon
+    discoverServerIp();
   } else {
-    Serial.println("WiFi Connection Failed. Starting in Offline Mode.");
+    Serial.println("WiFi Connection Failed. Starting AP Config Portal.");
+    startAPConfigMode();
+    return; // Skip standard setup since we entered AP mode
   }
 
   client.setTimeout(2);
   setupI2S();
-
-
 
   tft.fillScreen(COLOR_BG);
   setAppState(STATE_CLOCK);
@@ -1500,6 +1666,14 @@ void setup() {
 
 
 void loop() {
+  if (isConfigMode) {
+    webServer.handleClient();
+    if (shouldReboot && (millis() - rebootTimerMs > 2000)) {
+      ESP.restart();
+    }
+    return; // Don't run normal loop logic
+  }
+
   updateAnimations();
 
   // Read PIR sensor (HC-SR501 on PIR_PIN = 27)
@@ -1660,7 +1834,7 @@ void loop() {
       lastServerConnectAttemptMs = now;
       if (WiFi.status() == WL_CONNECTED) {
         Serial.println("Attempting connection to companion server...");
-        if (client.connect(SERVER_IP, SERVER_PORT)) {
+        if (client.connect(activeServerIp.c_str(), SERVER_PORT)) {
           client.setNoDelay(true);
           Serial.println("Connected to server successfully!");
           setAppState(STATE_CLOCK);

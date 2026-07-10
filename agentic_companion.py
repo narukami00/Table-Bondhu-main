@@ -168,34 +168,111 @@ chat_session = LocalChatSession(system_instruction=SYSTEM_INSTRUCTION)
 print("Systems Online! Ready to listen.")
 
 # --- LAPTOP AUDIO HELPERS ---
+import sys
+import subprocess
+import math
+import struct
+
+active_audio_process = None
+loop_alarm_active = False
+
+def generate_default_sounds():
+    """Dynamically generate generic alert WAV files if not present (useful for headless Linux/Raspberry Pi)"""
+    import os
+    if not os.path.exists("beep.wav"):
+        try:
+            sample_rate = 8000
+            with wave.open("beep.wav", "wb") as w:
+                w.setnchannels(1)
+                w.setsampwidth(2)
+                w.setframerate(sample_rate)
+                # 150ms of 2000Hz tone
+                for i in range(int(sample_rate * 0.15)):
+                    val = int(32767.0 * math.sin(2.0 * math.pi * 2000 * i / sample_rate))
+                    w.writeframes(struct.pack('h', val))
+        except Exception as e:
+            print(f"Failed to generate beep.wav: {e}")
+
+    if not os.path.exists("alarm_sound.wav"):
+        try:
+            sample_rate = 8000
+            with wave.open("alarm_sound.wav", "wb") as w:
+                w.setnchannels(1)
+                w.setsampwidth(2)
+                w.setframerate(sample_rate)
+                # 1 second of pulsing 1000Hz tone (beep-beep)
+                for i in range(int(sample_rate * 1.0)):
+                    if (i % 1600) < 800:
+                        val = int(32767.0 * math.sin(2.0 * math.pi * 1000 * i / sample_rate))
+                    else:
+                        val = 0
+                    w.writeframes(struct.pack('h', val))
+        except Exception as e:
+            print(f"Failed to generate alarm_sound.wav: {e}")
+
 def play_wake_up_sound():
-    try:
-        import winsound
-        # Short high pitch beep to signal wakeup
-        winsound.Beep(2000, 150)
-        winsound.Beep(2500, 150)
-    except Exception as e:
-        print(f"Failed to play wake up sound: {e}")
+    if sys.platform.startswith('win'):
+        try:
+            import winsound
+            # Short high pitch beep to signal wakeup
+            winsound.Beep(2000, 150)
+            winsound.Beep(2500, 150)
+        except Exception as e:
+            print(f"Failed to play wake up sound: {e}")
+    else:
+        generate_default_sounds()
+        try:
+            subprocess.Popen(["aplay", "beep.wav"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception as e:
+            print(f"[Audio Error] Failed to play wake up sound via aplay: {e}")
 
 def play_alarm_sound():
-    try:
-        import winsound
-        # Loop the system hand sound asynchronously
-        winsound.PlaySound("SystemHand", winsound.SND_ALIAS | winsound.SND_ASYNC | winsound.SND_LOOP)
-    except Exception as e:
-        print(f"Failed to play alarm sound: {e}")
+    global active_audio_process, loop_alarm_active
+    stop_active_alarm()
+    
+    if sys.platform.startswith('win'):
+        try:
+            import winsound
+            # Loop the system hand sound asynchronously
+            winsound.PlaySound("SystemHand", winsound.SND_ALIAS | winsound.SND_ASYNC | winsound.SND_LOOP)
+        except Exception as e:
+            print(f"Failed to play alarm sound: {e}")
+    else:
+        generate_default_sounds()
+        loop_alarm_active = True
+        def alarm_loop():
+            global active_audio_process
+            while loop_alarm_active:
+                try:
+                    active_audio_process = subprocess.Popen(["aplay", "alarm_sound.wav"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    active_audio_process.wait()
+                except Exception:
+                    break
+                time.sleep(0.5)
+        threading.Thread(target=alarm_loop, daemon=True).start()
 
 def stop_active_alarm():
-    global active_alarm_active, active_alarm_name, alarm_fired_at
+    global active_alarm_active, active_alarm_name, alarm_fired_at, active_audio_process, loop_alarm_active
     active_alarm_active = False
     active_alarm_name = ""
     alarm_fired_at = None
-    try:
-        import winsound
-        winsound.PlaySound(None, winsound.SND_PURGE)
-        print("[Alarm] Buzzing stopped.")
-    except Exception as e:
-        print(f"Failed to stop alarm sound: {e}")
+    loop_alarm_active = False
+    
+    if sys.platform.startswith('win'):
+        try:
+            import winsound
+            winsound.PlaySound(None, winsound.SND_PURGE)
+            print("[Alarm] Buzzing stopped.")
+        except Exception as e:
+            print(f"Failed to stop alarm sound: {e}")
+    else:
+        if active_audio_process is not None:
+            try:
+                active_audio_process.terminate()
+            except Exception:
+                pass
+            active_audio_process = None
+            print("[Alarm] Buzzing stopped.")
 
 # --- TTS (Text-to-Speech) via Google TTS ---
 def play_speech_on_laptop(text):
@@ -250,9 +327,16 @@ def play_speech_on_laptop(text):
         temp_wav = "temp_tts_playback.wav"
         pitched_sound.export(temp_wav, format="wav")
         
-        # Play asynchronously using winsound
+        # Play asynchronously (cross-platform)
         print(f"[TTS Pikachu] Playing asynchronously: '{text}' ({duration_sec:.1f}s)")
-        winsound.PlaySound(temp_wav, winsound.SND_FILENAME | winsound.SND_ASYNC)
+        if sys.platform.startswith('win'):
+            import winsound
+            winsound.PlaySound(temp_wav, winsound.SND_FILENAME | winsound.SND_ASYNC)
+        else:
+            try:
+                subprocess.Popen(["aplay", temp_wav], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except Exception as e:
+                print(f"[Audio Error] Failed to play speech via aplay: {e}")
         return duration_sec
     except Exception as e:
         print(f"[TTS Pikachu Error] {e}")
@@ -1480,6 +1564,18 @@ class VoiceAgentHandler:
         except Exception as e:
             print(f"[Error] Failed to send socket command: {e}")
 
+def udp_discovery_beacon():
+    """Broadcast UDP discovery packets to help ESP32 dynamically locate the server IP"""
+    udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    udp_sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+    print("[Discovery] UDP beacon broadcaster running on port 9999...")
+    while True:
+        try:
+            udp_sock.sendto(b"TABLE_BONDHU_BEACON", ('<broadcast>', 9999))
+        except Exception:
+            pass
+        time.sleep(2)
+
 def start_server():
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -1492,6 +1588,10 @@ def start_server():
         # Start scheduler
         sched_thread = threading.Thread(target=alarm_scheduler, daemon=True)
         sched_thread.start()
+        
+        # Start UDP Discovery Beacon Broadcaster
+        udp_thread = threading.Thread(target=udp_discovery_beacon, daemon=True)
+        udp_thread.start()
         
         while True:
             conn, addr = s.accept()
