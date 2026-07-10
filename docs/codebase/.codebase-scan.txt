@@ -6,23 +6,6 @@
 .vscode\c_cpp_properties.json
 .vscode\extensions.json
 agentic_companion.py
-analyze_recordings.py
-Arduino
-Arduino\config.h
-Arduino\images
-Arduino\images\images.h
-Arduino\images\README.md
-Arduino\sketches
-Arduino\sketches\gemini_button
-Arduino\sketches\gemini_button\gemini_LLM_btn.ino
-Arduino\sketches\live_rec
-Arduino\sketches\live_rec\live_rec.ino
-Arduino\sketches\save_recording
-Arduino\sketches\save_recording\save_arduino.ino
-Arduino\utils
-Arduino\utils\display.h
-Arduino\utils\i2s_setup.h
-Arduino\utils\wifi.h
 assets
 assets\girl
 assets\girl\eyes_closed_mouth_open.jpg
@@ -61,155 +44,28 @@ docs\codebase
 docs\codebase\.codebase-scan.txt
 docs\codebase\ARCHITECTURE.md
 docs\codebase\CONCERNS.md
-docs\codebase\CONVENTIONS.md
-docs\codebase\INTEGRATIONS.md
 docs\codebase\STACK.md
-docs\codebase\STRUCTURE.md
-docs\codebase\TESTING.md
-docs\docs.zip
 docs\README.md
 docs\STRUCTURE.md
-gemini_LLM.py
-gemini_LLM2.py
 gemini_LLM_btn
 gemini_LLM_btn\config.h
 gemini_LLM_btn\gemini_LLM_btn.ino
 gemini_LLM_btn\images.h
-gemini_LLM_Button.py
 LICENSE
-live_rec
-live_rec\config.h
-live_rec\live_rec.ino
-live_transcribe.py
-models
-models\gtcrn_simple.onnx
-models\vits-piper-en_US-amy-low
-models\vits-piper-en_US-amy-low\en_US-amy-low.onnx
-models\vits-piper-en_US-amy-low\en_US-amy-low.onnx.json
-models\vits-piper-en_US-amy-low\espeak-ng-data
-models\vits-piper-en_US-amy-low\espeak-ng-data\af_dict
-models\vits-piper-en_US-amy-low\espeak-ng-data\am_dict
-models\vits-piper-en_US-amy-low\espeak-ng-data\an_dict
-models\vits-piper-en_US-amy-low\espeak-ng-data\ar_dict
-models\vits-piper-en_US-amy-low\espeak-ng-data\as_dict
-models\vits-piper-en_US-amy-low\espeak-ng-data\az_dict
-models\vits-piper-en_US-amy-low\espeak-ng-data\ba_dict
-models\vits-piper-en_US-amy-low\espeak-ng-data\be_dict
-models\vits-piper-en_US-amy-low\espeak-ng-data\bg_dict
-models\vits-piper-en_US-amy-low\espeak-ng-data\bn_dict
-models\vits-piper-en_US-amy-low\espeak-ng-data\bpy_dict
-models\vits-piper-en_US-amy-low\espeak-ng-data\bs_dict
-models\vits-piper-en_US-amy-low\espeak-ng-data\ca_dict
-models\vits-piper-en_US-amy-low\espeak-ng-data\chr_dict
-models\vits-piper-en_US-amy-low\espeak-ng-data\cmn_dict
-models\vits-piper-en_US-amy-low\espeak-ng-data\cs_dict
-models\vits-piper-en_US-amy-low\espeak-ng-data\cv_dict
-models\vits-piper-en_US-amy-low\espeak-ng-data\cy_dict
-models\vits-piper-en_US-amy-low\espeak-ng-data\da_dict
-models\vits-piper-en_US-amy-low\espeak-ng-data\de_dict
-models\vits-piper-en_US-amy-low\espeak-ng-data\el_dict
-models\vits-piper-en_US-amy-low\espeak-ng-data\en_dict
-models\vits-piper-en_US-amy-low\espeak-ng-data\eo_dict
-models\vits-piper-en_US-amy-low\espeak-ng-data\es_dict
-models\vits-piper-en_US-amy-low\espeak-ng-data\et_dict
-models\vits-piper-en_US-amy-low\espeak-ng-data\eu_dict
-models\vits-piper-en_US-amy-low\espeak-ng-data\fa_dict
-models\vits-piper-en_US-amy-low\espeak-ng-data\fi_dict
-models\vits-piper-en_US-amy-low\espeak-ng-data\fr_dict
-models\vits-piper-en_US-amy-low\espeak-ng-data\ga_dict
-models\vits-piper-en_US-amy-low\espeak-ng-data\gd_dict
-models\vits-piper-en_US-amy-low\espeak-ng-data\gn_dict
-models\vits-piper-en_US-amy-low\espeak-ng-data\grc_dict
-models\vits-piper-en_US-amy-low\espeak-ng-data\gu_dict
-models\vits-piper-en_US-amy-low\espeak-ng-data\hak_dict
-models\vits-piper-en_US-amy-low\espeak-ng-data\haw_dict
-models\vits-piper-en_US-amy-low\espeak-ng-data\he_dict
-models\vits-piper-en_US-amy-low\espeak-ng-data\hi_dict
-models\vits-piper-en_US-amy-low\espeak-ng-data\hr_dict
-models\vits-piper-en_US-amy-low\espeak-ng-data\ht_dict
-models\vits-piper-en_US-amy-low\espeak-ng-data\hu_dict
-models\vits-piper-en_US-amy-low\espeak-ng-data\hy_dict
-models\vits-piper-en_US-amy-low\espeak-ng-data\ia_dict
-models\vits-piper-en_US-amy-low\espeak-ng-data\id_dict
-models\vits-piper-en_US-amy-low\espeak-ng-data\intonations
-models\vits-piper-en_US-amy-low\espeak-ng-data\io_dict
-models\vits-piper-en_US-amy-low\espeak-ng-data\is_dict
-models\vits-piper-en_US-amy-low\espeak-ng-data\it_dict
-models\vits-piper-en_US-amy-low\espeak-ng-data\ja_dict
-models\vits-piper-en_US-amy-low\espeak-ng-data\jbo_dict
-models\vits-piper-en_US-amy-low\espeak-ng-data\ka_dict
-models\vits-piper-en_US-amy-low\espeak-ng-data\kk_dict
-models\vits-piper-en_US-amy-low\espeak-ng-data\kl_dict
-models\vits-piper-en_US-amy-low\espeak-ng-data\kn_dict
-models\vits-piper-en_US-amy-low\espeak-ng-data\ko_dict
-models\vits-piper-en_US-amy-low\espeak-ng-data\kok_dict
-models\vits-piper-en_US-amy-low\espeak-ng-data\ku_dict
-models\vits-piper-en_US-amy-low\espeak-ng-data\ky_dict
-models\vits-piper-en_US-amy-low\espeak-ng-data\la_dict
-models\vits-piper-en_US-amy-low\espeak-ng-data\lang
-models\vits-piper-en_US-amy-low\espeak-ng-data\lb_dict
-models\vits-piper-en_US-amy-low\espeak-ng-data\lfn_dict
-models\vits-piper-en_US-amy-low\espeak-ng-data\lt_dict
-models\vits-piper-en_US-amy-low\espeak-ng-data\lv_dict
-models\vits-piper-en_US-amy-low\espeak-ng-data\mi_dict
-models\vits-piper-en_US-amy-low\espeak-ng-data\mk_dict
-models\vits-piper-en_US-amy-low\espeak-ng-data\ml_dict
-models\vits-piper-en_US-amy-low\espeak-ng-data\mr_dict
-models\vits-piper-en_US-amy-low\espeak-ng-data\ms_dict
-models\vits-piper-en_US-amy-low\espeak-ng-data\mt_dict
-models\vits-piper-en_US-amy-low\espeak-ng-data\mto_dict
-models\vits-piper-en_US-amy-low\espeak-ng-data\my_dict
-models\vits-piper-en_US-amy-low\espeak-ng-data\nci_dict
-models\vits-piper-en_US-amy-low\espeak-ng-data\ne_dict
-models\vits-piper-en_US-amy-low\espeak-ng-data\nl_dict
-models\vits-piper-en_US-amy-low\espeak-ng-data\no_dict
-models\vits-piper-en_US-amy-low\espeak-ng-data\nog_dict
-models\vits-piper-en_US-amy-low\espeak-ng-data\om_dict
-models\vits-piper-en_US-amy-low\espeak-ng-data\or_dict
-models\vits-piper-en_US-amy-low\espeak-ng-data\pa_dict
-models\vits-piper-en_US-amy-low\espeak-ng-data\pap_dict
-models\vits-piper-en_US-amy-low\espeak-ng-data\phondata
-models\vits-piper-en_US-amy-low\espeak-ng-data\phondata-manifest
-models\vits-piper-en_US-amy-low\espeak-ng-data\phonindex
-models\vits-piper-en_US-amy-low\espeak-ng-data\phontab
-models\vits-piper-en_US-amy-low\espeak-ng-data\piqd_dict
-models\vits-piper-en_US-amy-low\espeak-ng-data\pl_dict
-models\vits-piper-en_US-amy-low\espeak-ng-data\pt_dict
-models\vits-piper-en_US-amy-low\espeak-ng-data\py_dict
-models\vits-piper-en_US-amy-low\espeak-ng-data\qdb_dict
-models\vits-piper-en_US-amy-low\espeak-ng-data\qu_dict
-models\vits-piper-en_US-amy-low\espeak-ng-data\quc_dict
-models\vits-piper-en_US-amy-low\espeak-ng-data\qya_dict
-models\vits-piper-en_US-amy-low\espeak-ng-data\ro_dict
-models\vits-piper-en_US-amy-low\espeak-ng-data\ru_dict
-models\vits-piper-en_US-amy-low\espeak-ng-data\sd_dict
-models\vits-piper-en_US-amy-low\espeak-ng-data\shn_dict
-models\vits-piper-en_US-amy-low\espeak-ng-data\si_dict
-models\vits-piper-en_US-amy-low\espeak-ng-data\sjn_dict
-models\vits-piper-en_US-amy-low\espeak-ng-data\sk_dict
-models\vits-piper-en_US-amy-low\espeak-ng-data\sl_dict
-models\vits-piper-en_US-amy-low\espeak-ng-data\smj_dict
-models\vits-piper-en_US-amy-low\espeak-ng-data\sq_dict
-models\vits-piper-en_US-amy-low\espeak-ng-data\sr_dict
-models\vits-piper-en_US-amy-low\espeak-ng-data\sv_dict
-models\vits-piper-en_US-amy-low\espeak-ng-data\sw_dict
-models\vits-piper-en_US-amy-low\espeak-ng-data\ta_dict
-models\vits-piper-en_US-amy-low\espeak-ng-data\te_dict
-models\vits-piper-en_US-amy-low\espeak-ng-data\th_dict
-models\vits-piper-en_US-amy-low\espeak-ng-data\tk_dict
-models\vits-piper-en_US-amy-low\espeak-ng-data\tn_dict
-models\vits-piper-en_US-amy-low\espeak-ng-data\tr_dict
-models\vits-piper-en_US-amy-low\espeak-ng-data\tt_dict
+reminders.json
+requirements.txt
+SETUP.md
+Table_Bondhu_Project_Guide.pdf
 
 === STACK DETECTION (manifest files) ===
 
 --- requirements.txt ---
 python-dotenv
-google-generativeai
 onnx-asr
-SpeechRecognition
 numpy
 sherpa-onnx
+gTTS
+pydub
 
 
 === ENTRY POINTS ===
@@ -225,6 +81,7 @@ No .env.example or .env.template found. Identify required environment variables 
 None found.
 
 === GIT RECENT COMMITS (last 20) ===
+078c303 fix: bypass GTCRN speech denoiser to restore high ASR transcription accuracy
 7e312cf feat: integrate offline VITS Text-to-Speech using Piper model with Google TTS fallback
 d12e38d feat: integrate GTCRN speech denoiser to enhance voice recordings in noisy environments
 976ef4c feat: instruct LLM to extract descriptive reminder topics/tasks rather than defaulting to generic names
@@ -244,14 +101,13 @@ f3de5f6 fix boot crash: move themedBuf[32KB] from static RAM to heap malloc in s
 880a4db fix 3 bugs: playAudioStop on state transitions, serverDuration leak in UI_LIST, TCP framing with recv_buffer
 f7cb11c fix compile errors: move bubbleLineCount globals before updateAnimations, cast volatile for memcpy/free
 bc000c8 fix 5 gaps: COLOR_ACCENT for clock/syncing, 15s LISTENING/THINKING timeout, main button edge detection, clear greetingMode on press
-ab2704a add pushThemedImage: replace ASSET_BG with COLOR_BG for dynamic sprite backgrounds
 
 === HIGH-CHURN FILES (last 90 days, top 20) ===
   17 gemini_LLM_btn/gemini_LLM_btn.ino
-  14 agentic_companion.py
+  15 agentic_companion.py
+   3 docs/codebase/.codebase-scan.txt
+   3 docs/codebase/ARCHITECTURE.md
    3 reminders.json
-   2 docs/codebase/.codebase-scan.txt
-   2 docs/codebase/ARCHITECTURE.md
    2 docs/codebase/CONCERNS.md
    2 docs/codebase/CONVENTIONS.md
    2 docs/codebase/INTEGRATIONS.md
@@ -272,25 +128,25 @@ ab2704a add pushThemedImage: replace ASSET_BG with COLOR_BG for dynamic sprite b
 No monorepo signals detected.
 
 === CODE METRICS ===
-Total files scanned: 359
-Total lines of code: 3236
+Total files scanned: 47
+Total lines of code: 1422
 
 Files by language:
-  Other: 327
-  Python: 24
-  C Header: 8
+  Other: 43
+  Python: 2
+  C Header: 2
 
 Top 10 largest files:
-models\vits-piper-en_US-amy-low\en_US-amy-low.onnx: 61625.6KB
 gemini_LLM_btn\images.h: 3413.2KB
-recordings_analysis\rec_20260630_174247.wav: 1094.0KB
 assets\Pikachu\eyes_open_mouth_open_60.png: 1090.0KB
 assets\girl\wave_1.png: 789.8KB
 assets\Pikachu\eyes_open_mouth_open_20.png: 759.1KB
 assets\Pikachu\peek_4.png: 746.2KB
-Screenshot 2026-05-28 020124.png: 734.7KB
-recordings_analysis\rec_20260630_172739.wav: 696.0KB
 assets\Pikachu\eyes_closed_mouth_open.png: 684.1KB
+assets\Pikachu\wave_2.png: 680.0KB
+assets\Pikachu\wave_1.png: 318.7KB
+assets\Pikachu\wave_3.png: 297.6KB
+assets\girl\wave_2.jpeg: 164.1KB
 
 === CI/CD PIPELINES ===
 No CI/CD pipelines detected.

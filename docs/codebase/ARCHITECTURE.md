@@ -1,67 +1,122 @@
-# Architecture
+# System Architecture
 
 ## Core Sections (Required)
 
 ### 1) Architectural Style
 
-- **Primary style**: Layered Client-Server Architecture + State-Driven Firmware (FSM)
-- **Why this classification**:
-  - The Python companion server operates as a multi-threaded service coordinating TCP communication, voice transcription (ASR), local keyword parsing, Google TTS voice synthesis, and alarm scheduling.
-  - The ESP32 firmware is a Finite State Machine (FSM) transitioning between states using a volatile `currentState` enum. Transitions are triggered either locally (via button interactions or timers) or remotely (via TCP command packets).
-- **Primary constraints**:
-  - **Microcontroller Memory Limitations**: The ESP32's static RAM is extremely limited. Image asset frames (sprites) are stored in program memory (PROGMEM) in `images.h`. High RAM allocations like the `themedBuf` (32KB) are dynamically allocated on the heap during `setup()` to prevent boot crashes. Preprocessor conditional directives are used to compile specific character assets and halve the binary size.
-  - **Zero-Block Loop Requirement**: The main firmware loop must execute animation frames and check sensors at 60+ FPS. Any network transaction (such as Wi-Fi connection attempts or server socket connections) must be non-blocking to prevent UI and local countdown freezes.
-  - **Thread-safe Server Transport**: The Python companion utilizes socket locks (`send_lock`) to serialize outgoing TCP writes, preventing socket stream corruption when background scheduler alarms fire while the main thread is sending TTS data.
+- Primary style: Client-Server / Thin-Client (Hardware) + Thick-Server (Python backend).
+- Why this classification: The ESP32 client functions as a thin sensor-and-display node that streams raw PCM audio and LDR/PIR status updates over TCP, while the Python server handles intensive operations (ASR transcription, LLM processing, TTS synthesis, scheduling, and local audio output).
+- Primary constraints:
+  1. Network dependency: The system cannot transcribe speech or process LLM queries without a stable TCP connection to the Python server.
+  2. Hardware memory limitations: The ESP32's internal RAM requires moving large buffers (such as the 32KB themed buffer) to the heap to prevent boot crashes.
+  3. Operating system limits: The Python server uses `winsound` for audio playback, restricting the server runtime to Windows environments.
 
 ### 2) System Flow
 
 ```text
-[Online Flow]
-User speech -> ESP32 Mic -> TCP Stream -> Python Server -> ASR (ONNX) -> Local Keyword / Gemini LLM -> TTS Modulator -> TCP Sync -> Laptop Speaker & ESP32 UI
-
-[Focus Timer Flow]
-Voice request -> Python Parser -> TIMER_START -> ESP32 STATE_TIMER (Local Decrement)
-Short press (PTT) -> STATE_TIMER_PAUSED (Freeze Decrement)
-Long press (PTT) / BOOT button -> TIMER_DONE -> Return to STATE_CLOCK
-Countdown ends -> STATE_TIMER_FINISHED -> Buzzer + TCP TIMER_DONE -> Looping Laptop Alarm
+[ESP32 Mic Capture] -> [TCP streaming to Server] -> [Parakeet ASR & LLM Processing] -> [TTS Synthesis] -> [Laptop Speaker & ESP32 screen update]
 ```
 
-#### Detailed Operations Flow:
-1. **Audio Capture & Streaming**: When the user presses the PTT button, the ESP32 enters `STATE_WAVING_INTRO` and then `STATE_LISTENING`. It reads raw 16-bit mono audio via the I2S microphone (ADC mode, resulting in ~22050Hz/44100Hz stream) and streams it inside a `CMD:WOKE` / `___END___` wrapper over TCP port 8080. The Python server resamples this audio to 16kHz before transcription (the neural denoiser is bypassed to avoid ASR degradation from processing artifacts).
-2. **ASR, Context Injection & Keyword Interception**: The Python server saves the stream to a WAV file and transcribes it locally using an ONNX-based ASR engine. The text is passed to the keyword scanner first:
-   * If it matches timer/alarm commands (e.g. *"Set a timer for 10 minutes"*), the Python server parses the duration and sends `TIMER_START:600` to the ESP32, bypassing the LLM.
-   * Otherwise, the server queries the active reminders list from `reminders.json` and dynamically injects the active reminders list with their 1-based indices into the Gemini LLM's system prompt context. The user's query is then sent to the Google Gemini API.
-   * If the LLM generates a deletion command (e.g. `[CMD:DELETE_REMINDER|index]` from the prompt context), the companion parses it and performs the deletion.
-3. **Pikachu voice synthesis**: The response text is synthesized using the offline Piper VITS engine (`en_US-amy-low` model) for fully offline performance (falling back to Google gTTS if the offline model is uninitialized). The generated audio is shifted in pitch and speed (1.40x) for a cute Pikachu sound, padded with 1 second of silence, and played asynchronously via `winsound` on the laptop.
-4. **Mouth Sync**: The Python server calculates the *original* duration of the speech (before adding silence) and sends it as `DURATION:x.x` to the ESP32. The ESP32 enters `STATE_SPEAKING` and runs the mouth animation for exactly `x.x` seconds, transitioning back to `STATE_IDLE` while the laptop speaker plays the trailing silence.
-5. **Focus Timer Countdowns**:
-   * **Running (`STATE_TIMER`)**: The ESP32 decrements the count locally once per second, redrawing only the inner digit box to prevent screen flickering. The digits scale dynamically: Size 2 (12px wide) for `HH:MM:SS` to prevent boundary clipping, and Size 3 (18px wide) for `MM:SS`.
-   * **Paused (`STATE_TIMER_PAUSED`)**: Pressing the PTT button pauses the local decrement. The screen shows `** PAUSED **` and instructions.
-   * **Completed (`STATE_TIMER_FINISHED`)**: When the timer reaches 0, the ESP32 starts its local buzzer, flashes the screen red, and sends `TIMER_DONE` to the laptop. The companion server receives `TIMER_DONE` and triggers the looped `"SystemHand"` alarm sound on the laptop.
+1. **Input**: User presses the button (GPIO 14) or the PIR motion sensor triggers a wake-up. The ESP32 captures 16kHz PCM audio via its internal ADC on GPIO 32.
+2. **Transport**: The ESP32 streams the raw audio PCM bytes over a raw TCP socket connection on port 8080.
+3. **Transcription & Coordination**: The Python server's `VoiceAgentHandler` receives the stream, resamples it, runs Parakeet ASR, sends the text to the LLM (LM Studio), and parses any generated `[CMD:...]` tags.
+4. **Action & Output**: The server triggers local audio playback (via winsound TTS) and sends display commands (`UI_MSG:...`, `UI_STATE:...`) back to the ESP32 over TCP.
+5. **Display**: The ESP32 updates its TFT display using sprites (faceSprite, cameoSprite) based on state changes.
 
 ### 3) Layer/Module Responsibilities
 
 | Layer or module | Owns | Must not own | Evidence |
 |-----------------|------|--------------|----------|
-| `agentic_companion.py` | TCP socket server, ASR transcribing, local keyword routing, gTTS speech modulation, database operations, alarm scheduler. | Rendering graphics on LCD, reading LDR sensors, polling buttons. | [agentic_companion.py](file:///F:/__KUET%20CSE22/Assignments/IOT/Table-Bondhu-main/agentic_companion.py) |
-| `gemini_LLM_btn.ino` | FSM state transitions, LCD drawing/flicker management, button hold/click parsing, LDR-based theme switching, buzzer alerts, I2S recording. | Running language models, calculating absolute calendar triggers. | [gemini_LLM_btn/gemini_LLM_btn.ino](file:///F:/__KUET%20CSE22/Assignments/IOT/Table-Bondhu-main/gemini_LLM_btn/gemini_LLM_btn.ino) |
-| `images.h` | Pixel bitmap hex arrays for animations (`avatar_wave`, `peek`, `eyes_closed`). | Logic loops, pin configurations. | [gemini_LLM_btn/images.h](file:///F:/__KUET%20CSE22/Assignments/IOT/Table-Bondhu-main/gemini_LLM_btn/images.h) |
+| `VoiceAgentHandler` | TCP framing, keyword detection, speech buffer processing, and command routing | Low-level SPI display control, TFT rendering | [agentic_companion.py](file:///F:/__KUET%20CSE22/Assignments/IOT/Table-Bondhu-main/agentic_companion.py#L568) |
+| `LocalChatSession` | LLM communication, conversation history buffer management, and system instruction updates | Audio playbacks, TCP socket bindings | [agentic_companion.py](file:///F:/__KUET%20CSE22/Assignments/IOT/Table-Bondhu-main/agentic_companion.py#L78) |
+| `Alarm Scheduler` | Periodic scanning of `reminders.json` and firing active alarms/alerts | Direct microphone stream ingestion | [agentic_companion.py](file:///F:/__KUET%20CSE22/Assignments/IOT/Table-Bondhu-main/agentic_companion.py#L501) |
+| ESP32 App Loop | Local state machine transitions, I2S ADC reading, TFT SPI display rendering, and sensor polling | LLM context construction, ASR model execution | [gemini_LLM_btn.ino](file:///F:/__KUET%20CSE22/Assignments/IOT/Table-Bondhu-main/gemini_LLM_btn/gemini_LLM_btn.ino#L1288) |
 
 ### 4) Reused Patterns
 
-* **State-Driven Rendering**: The ESP32's `updateAnimations()` loop polls `currentState`. It uses conditional flags (`needRedraw`) to only rewrite modified sub-rectangles of the screen instead of executing full-screen clears, ensuring smooth 60 FPS rendering.
-* **Edge-Triggered Hold-Timing**: The main button handler tracks the duration of button presses using `millis() - buttonPressStartMs`. If it exceeds 1000ms during active timer states, it triggers a long-press cancel. If it is released before that, it registers a short-press click (pause/resume).
-* **Non-Blocking Network Handshakes**: WiFi and Server socket connection checks in `loop()` are non-blocking. If a connection is lost, it falls back to a offline UI banner (`DISCONNECTED` and `HAVE A GOOD DAY!`) and tries to reconnect every 10 seconds without stalling the main thread.
+| Pattern | Where found | Why it exists |
+|---------|-------------|---------------|
+| State Machine | [gemini_LLM_btn.ino](file:///F:/__KUET%20CSE22/Assignments/IOT/Table-Bondhu-main/gemini_LLM_btn/gemini_LLM_btn.ino#L102-L117) | Coordinates 14 UI and sensor states (CLOCK, CAMEO, SLEEPING, SPEAKING, etc.) cleanly. |
+| Singleton/Global Instance | [agentic_companion.py](file:///F:/__KUET%20CSE22/Assignments/IOT/Table-Bondhu-main/agentic_companion.py#L78) | Wraps the LLM session to preserve active chat history context throughout the runtime. |
+| Double Buffering/Sprites | [gemini_LLM_btn.ino](file:///F:/__KUET%20CSE22/Assignments/IOT/Table-Bondhu-main/gemini_LLM_btn/gemini_LLM_btn.ino#L98-L99) | Employs TFT_eSPI sprites for the avatar face and cameos to prevent screen flickering. |
 
 ### 5) Known Architectural Risks
 
-- **Local Network Dependence**: If the user's WiFi drops, the assistant loses time syncing (NTP) and LLM cloud access.
-- **ASR Latency**: Transcription of WAV files is done on the laptop CPU. If CPU utilization is high, ASR will block the socket thread, delaying Pikachu's response.
-- **Unencrypted TCP Socket**: Device commands and voice recordings are sent in raw bytes without TLS encryption, leaving them open to local network eavesdropping.
+- **TCP Blocking**: A drop in network connectivity causes connection retries that block state handling on the ESP32.
+- **Monolithic Layout**: Both client and server codes are monolithic single-file structures, increasing the risk of unintended state interference during updates.
+- **Platform Incompatibility**: Using `winsound` locks server-side execution to Windows environments.
 
 ### 6) Evidence
 
-- [gemini_LLM_btn.ino](file:///F:/__KUET%20CSE22/Assignments/IOT/Table-Bondhu-main/gemini_LLM_btn/gemini_LLM_btn.ino)
 - [agentic_companion.py](file:///F:/__KUET%20CSE22/Assignments/IOT/Table-Bondhu-main/agentic_companion.py)
-- [images.h](file:///F:/__KUET%20CSE22/Assignments/IOT/Table-Bondhu-main/gemini_LLM_btn/images.h)
-- [reminders.json](file:///F:/__KUET%20CSE22/Assignments/IOT/Table-Bondhu-main/reminders.json)
+- [gemini_LLM_btn/gemini_LLM_btn.ino](file:///F:/__KUET%20CSE22/Assignments/IOT/Table-Bondhu-main/gemini_LLM_btn/gemini_LLM_btn.ino)
+- [docs/API.md](file:///F:/__KUET%20CSE22/Assignments/IOT/Table-Bondhu-main/docs/API.md)
+
+---
+
+## Extended Sections (Optional)
+
+### System State Machine (ESP32)
+
+```
+                    ┌─────────────┐
+         ┌─────────│   CLOCK     │◄────────────────────┐
+         │         └──────┬──────┘                     │
+         │                │ button press / cameo timer  │
+         │         ┌──────▼──────┐                     │
+         │         │   CAMEO     │                     │
+         │         └──────┬──────┘                     │
+         │                │ complete                    │
+         │         ┌──────▼──────┐                     │
+         │         │   WAVING    │                     │
+         │         │   _INTRO    │                     │
+         │         └──────┬──────┘                     │
+         │                │ wave complete               │
+         │         ┌──────▼──────┐                     │
+         │         │    IDLE     │──timeout 20s─────────┘
+         │         └──────┬──────┘
+         │                │ server: LISTENING
+         │         ┌──────▼──────┐
+         │         │  LISTENING  │──30s timeout──→ CLOCK
+         │         └──────┬──────┘
+         │                │ server: THINKING
+         │         ┌──────▼──────┐
+         │         │  THINKING   │──30s timeout──→ CLOCK
+         │         └──────┬──────┘
+         │                │ server: UI_MSG
+         │         ┌──────▼──────┐
+         │         │  SPEAKING   │──duration──→ IDLE
+         │         └──────┬──────┘
+         │                │ alarm
+         │         ┌──────▼──────┐
+         │         │    ALARM    │──30s / dismiss──→ CLOCK
+         │         └─────────────┘
+         │
+         │         ┌─────────────┐
+         │         │   TIMER     │◄── TIMER_START
+         │         └──────┬──────┘
+         │                │
+         │         ┌──────▼──────┐
+         │         │ TIMER_      │
+         │         │ PAUSED      │──resume──→ TIMER
+         │         └──────┬──────┘
+         │                │ cancel
+         │         ┌──────▼──────┐
+         │         │ TIMER_      │
+         │         │ FINISHED    │──dismiss──→ CLOCK
+         │         └─────────────┘
+         │
+          │         ┌─────────────┐
+          │         │  SLEEPING   │◄── no PIR motion, LDR < 500 & clock 30s
+          │         └──────┬──────┘
+          │                │ PIR motion / rising edge
+          │         ┌──────▼──────┐
+          │         │  SLEEPING_  │──10s timeout without confirmation──→ SLEEPING
+          │         │  PREWAKE    │
+          │         └──────┬──────┘
+          │                │ confirmed (held / 2 waves / button / server cmd)
+          │         ┌──────▼──────┐
+          │         │    SLEEP    │
+          │         │   SUMMARY   │──15s timeout / button press──→ CLOCK
+          └─────────└─────────────┘
+```

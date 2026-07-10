@@ -6,48 +6,42 @@
 
 | Item | Rule | Example | Evidence |
 |------|------|---------|----------|
-| Files | Python: `snake_case`, Arduino: `PascalCase` or `snake_case` | `agentic_companion.py`, `gemini_LLM_btn.ino` | [.codebase-scan.txt](file:///F:/__KUET%20CSE22/Assignments/IOT/Table-Bondhu-main/docs/codebase/.codebase-scan.txt) |
-| Functions/methods | Python: `snake_case`, Arduino: `camelCase` | `def start_server():`, `void switchTheme(int idx)` | [agentic_companion.py](file:///F:/__KUET%20CSE22/Assignments/IOT/Table-Bondhu-main/agentic_companion.py#L120), [gemini_LLM_btn/gemini_LLM_btn.ino](file:///F:/__KUET%20CSE22/Assignments/IOT/Table-Bondhu-main/gemini_LLM_btn/gemini_LLM_btn.ino#L109) |
-| Types/Classes | Python: `PascalCase` | `class ClientHandler:` | [Python/server/handlers.py](file:///F:/__KUET%20CSE22/Assignments/IOT/Table-Bondhu-main/Python/server/handlers.py#L10) |
-| Constants/env vars | Python/Arduino: `UPPER_CASE` | `LM_STUDIO_URL`, `BUTTON_PIN` | [agentic_companion.py](file:///F:/__KUET%20CSE22/Assignments/IOT/Table-Bondhu-main/agentic_companion.py#L29), [gemini_LLM_btn/gemini_LLM_btn.ino](file:///F:/__KUET%20CSE22/Assignments/IOT/Table-Bondhu-main/gemini_LLM_btn/gemini_LLM_btn.ino#L11) |
-
-- **Private methods**: Python private helper methods are prefixed with a single underscore (e.g. `_load_reminders_internal()`). [Evidence: [agentic_companion.py](file:///F:/__KUET%20CSE22/Assignments/IOT/Table-Bondhu-main/agentic_companion.py#L269)]
+| Files (Python) | lowercase with underscores | `agentic_companion.py` | [agentic_companion.py](file:///F:/__KUET%20CSE22/Assignments/IOT/Table-Bondhu-main/agentic_companion.py) |
+| Files (Arduino) | camelCase | `gemini_LLM_btn.ino` | [gemini_LLM_btn.ino](file:///F:/__KUET%20CSE22/Assignments/IOT/Table-Bondhu-main/gemini_LLM_btn/gemini_LLM_btn.ino) |
+| Functions (Python) | snake_case | `parse_timer_duration` | [agentic_companion.py](file:///F:/__KUET%20CSE22/Assignments/IOT/Table-Bondhu-main/agentic_companion.py#L173) |
+| Functions (Arduino) | camelCase | `updateAnimations` | [gemini_LLM_btn.ino](file:///F:/__KUET%20CSE22/Assignments/IOT/Table-Bondhu-main/gemini_LLM_btn/gemini_LLM_btn.ino#L642) |
+| Classes (Python) | PascalCase | `LocalChatSession` | [agentic_companion.py](file:///F:/__KUET%20CSE22/Assignments/IOT/Table-Bondhu-main/agentic_companion.py#L78) |
+| Constants (Arduino) | UPPER_CASE | `SLEEP_TIMEOUT_MS` | [gemini_LLM_btn.ino](file:///F:/__KUET%20CSE22/Assignments/IOT/Table-Bondhu-main/gemini_LLM_btn/gemini_LLM_btn.ino#L88) |
 
 ### 2) Formatting and Linting
 
-- Formatter: No automated formatter config is present. [Evidence: [.codebase-scan.txt](file:///F:/__KUET%20CSE22/Assignments/IOT/Table-Bondhu-main/docs/codebase/.codebase-scan.txt)]
-- Linter: No automated linter config is present. [Evidence: [.codebase-scan.txt](file:///F:/__KUET%20CSE22/Assignments/IOT/Table-Bondhu-main/docs/codebase/.codebase-scan.txt)]
-- Most relevant enforced rules: PEP-8 rules for Python and Arduino style guides for C++ sketches are manually maintained.
-- Run commands: None.
+- Formatter: `[TODO]` None configured.
+- Linter: `[TODO]` None configured.
+- Most relevant enforced rules: `[TODO]` None configured.
+- Run commands: `[TODO]` None.
 
 ### 3) Import and Module Conventions
 
-- **Import grouping/order**:
-  - Standard library imports first (e.g. `socket`, `threading`, `time`).
-  - Third-party package imports second (e.g. `numpy`, `onnx_asr`, `dotenv`).
-  - Local workspace modules third (e.g. `from config import settings`).
-- **Alias vs relative import policy**: Relative imports are used for Python files inside subpackages (`from ..utils import logger`), whereas top-level scripts use direct module imports.
-- **Public exports/barrel policy**: Empty package descriptors (`__init__.py` files) exist inside `Python/` subfolders but do not export specific lists.
+- Import grouping/order: Python imports are organized with standard library modules first, followed by third-party packages.
+- Alias vs relative import policy: Standard library and absolute imports only. No relative imports or aliases are utilized.
+- Public exports/barrel policy: Not applicable (single-file scripting structure).
 
 ### 4) Error and Logging Conventions
 
-- **Error strategy by layer**:
-  - Python scripts wrap runtime tasks in `try...except` loops to prevent server crashes.
-  - Arduino handles socket link and WiFi failures gracefully by displaying `"DISCONNECTED"` on the screen and attempting non-blocking reconnection.
-- **Logging style**:
-  - Standard backend uses the standard library `logging` wrapper configured in [Python/utils/logger.py](file:///F:/__KUET%20CSE22/Assignments/IOT/Table-Bondhu-main/Python/utils/logger.py). Format: `%(asctime)s - %(name)s - %(levelname)s - %(message)s`.
-  - Companion script uses direct `print()` statements for logs with prefixes like `[Alarm]`, `[TTS]`, `[Weather]`.
-- **Sensitive-data redaction rules**: No explicit log filters exist. Credentials are kept out of files via `.env` configurations.
+- Error strategy by layer:
+  - Python Server: Wrap processes (e.g. LLM completion, TCP socket writing, reminders IO) in `try...except` blocks, print exceptions to stdout/stderr, and send fallback messages/commands to the client.
+  - ESP32 Firmware: Basic check statements (e.g. `client.connected()`, checking return codes of NTP sync) and safety state recovery timeouts (returning to clock screen if stuck in LISTENING/THINKING for 30s).
+- Logging style and required context fields: Console output prints using custom formatting tags like `[*]`, `[TIMER]`, `[BUZZER]`, `[Error]`. Audio recordings and transcriptions are logged to local files under `recordings_analysis/` and `recordings_analysis/transcriptions.log`.
+- Sensitive-data redaction rules: `[TODO]` None implemented (WiFi credentials stored in plaintext in `config.h`).
 
 ### 5) Testing Conventions
 
-- **Test file naming/location rule**: Custom scripts are placed directly in the project root folder starting with `test_` or `analyze_` prefix (e.g. `test_rates.py`, `analyze_recordings.py`).
-- **Mocking strategy norm**: No mock libraries used. Testing relies on playing back local WAV file recordings.
-- **Coverage expectation**: No automated coverage tracking is present.
+- Test file naming/location rule: `[TODO]` No tests exist.
+- Mocking strategy norm: `[TODO]` No tests exist.
+- Coverage expectation: `[TODO]` No tests exist.
 
 ### 6) Evidence
 
-- [Python/utils/logger.py](file:///F:/__KUET%20CSE22/Assignments/IOT/Table-Bondhu-main/Python/utils/logger.py)
 - [agentic_companion.py](file:///F:/__KUET%20CSE22/Assignments/IOT/Table-Bondhu-main/agentic_companion.py)
 - [gemini_LLM_btn/gemini_LLM_btn.ino](file:///F:/__KUET%20CSE22/Assignments/IOT/Table-Bondhu-main/gemini_LLM_btn/gemini_LLM_btn.ino)
-- [test_rates.py](file:///F:/__KUET%20CSE22/Assignments/IOT/Table-Bondhu-main/test_rates.py)
+- [docs/STRUCTURE.md](file:///F:/__KUET%20CSE22/Assignments/IOT/Table-Bondhu-main/docs/STRUCTURE.md)

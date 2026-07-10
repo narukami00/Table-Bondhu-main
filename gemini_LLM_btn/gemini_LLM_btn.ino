@@ -11,33 +11,22 @@
 #define BOOT_BTN 0    // Built-in BOOT button for text pagination
 #define LDR_PIN 34   // ADC1_CH6 - Light Dependent Resistor
 #define BUZZER_PIN 13 // Active Buzzer (HIGH = sound)
+#define PIR_PIN 27    // PIR Motion Sensor (digital OUT)
 #define I2S_SAMPLE_RATE 16000
 
-// Theme definitions
+// Theme selection macros (required by images.h conditional compilation)
 #define THEME_GIRL 0
 #define THEME_PIKACHU 1
-
-// SELECT YOUR ACTIVE THEME HERE
 #define ACTIVE_THEME THEME_PIKACHU
 
-// Default colors from compile-time theme (copied to runtime vars in setup)
-#if ACTIVE_THEME == THEME_PIKACHU
-  #define DEFAULT_BG 0x18E6
-  #define DEFAULT_ACCENT 0xFEE0
-  #define DEFAULT_BORDER 0xFEE0
-  #define DEFAULT_BUBBLE_BG TFT_BLACK
-  #define DEFAULT_TEXT TFT_WHITE
-  #define DEFAULT_STATUS TFT_RED
-  #define ASSET_BG 0x18E6
-#else
-  #define DEFAULT_BG 0x911C
-  #define DEFAULT_ACCENT TFT_CYAN
-  #define DEFAULT_BORDER TFT_CYAN
-  #define DEFAULT_BUBBLE_BG TFT_BLACK
-  #define DEFAULT_TEXT TFT_WHITE
-  #define DEFAULT_STATUS TFT_GREEN
-  #define ASSET_BG 0x911C
-#endif
+// Default colors (Pikachu theme is the default and only active theme)
+#define DEFAULT_BG 0x18E6
+#define DEFAULT_ACCENT 0xFEE0
+#define DEFAULT_BORDER 0xFEE0
+#define DEFAULT_BUBBLE_BG TFT_BLACK
+#define DEFAULT_TEXT TFT_WHITE
+#define DEFAULT_STATUS TFT_RED
+#define ASSET_BG 0x18E6
 
 #include "images.h"
 
@@ -82,6 +71,34 @@ unsigned long buttonPressStartMs = 0;
 bool buttonHeldProcessed = false;
 unsigned long lastServerConnectAttemptMs = 0;
 
+// PIR Motion Sensor variables
+unsigned long lastPirMotionMs = 0;          // Last time PIR detected motion
+const unsigned long SLEEP_TIMEOUT_MS = 30000; // 30 seconds → sleeping mode
+
+// Sleep / Wake pre-wake flow variables (added for robust sleep monitoring)
+unsigned long clockStateEnteredMs = 0;      // Time when STATE_CLOCK was entered continuously
+unsigned long preWakeEnteredMs = 0;         // Time when STATE_SLEEPING_PREWAKE was entered
+unsigned long lastSleepHeartbeatMs = 0;     // Last time sleep heartbeat keep-alive command was sent
+int preWakeRisingEdges = 0;                 // Count PIR LOW->HIGH transitions during pre-wake
+unsigned long lastSleepEnteredMs = 0;       // Time when STATE_SLEEPING was entered
+
+// Sleep animation flare variables (added for sleep animation and clock updates)
+int sleepAnimState = 0;                     // 0 = normal sleep loop, 3 = smiling
+unsigned long lastSleepAnimUpdateMs = 0;    // Last time sleep animation frame changed
+bool sleepFrameToggle = false;              // Toggles between sleep_1 and sleep_2
+unsigned long sleepSmileStartMs = 0;        // Time when the sleeping smile started
+unsigned long nextSleepSmileTriggerMs = 0;  // Next time the smile will trigger
+unsigned long lastSleepClockUpdateMs = 0;   // Last time sleep clock was drawn
+
+// Sleep Summary variables
+String sleepSummaryType = "Sleep";      // "Sleep" or "Nap"
+float sleepSummaryDuration = 0.0f;     // duration in hours
+int sleepSummaryMovements = 0;         // movement count
+float sleepSummaryAvgNoise = 0.0f;     // average noise
+int sleepSummaryAvgLdr = 0;            // average light level
+String sleepSummaryQuality = "Good";   // "Good", "Fair", "Poor"
+unsigned long sleepSummaryStartMs = 0; // time when summary screen was displayed
+
 // Redraw control
 bool needRedraw = true;
 
@@ -107,7 +124,10 @@ enum AppState {
   STATE_REMINDERS,
   STATE_TIMER,
   STATE_TIMER_PAUSED,
-  STATE_TIMER_FINISHED
+  STATE_TIMER_FINISHED,
+  STATE_SLEEPING,
+  STATE_SLEEPING_PREWAKE,
+  STATE_SLEEP_SUMMARY
 };
 
 int ldrToTheme(int ldr) {
@@ -144,27 +164,23 @@ void pushThemedImage(TFT_eSprite &spr, int x, int y, int w, int h, const uint16_
 }
 
 // Sprite frame macros (reference images.h arrays, independent of runtime colors)
-#if ACTIVE_THEME == THEME_PIKACHU
-  #define CURRENT_IDLE pika_idle
-  #define CURRENT_HALF_BLINK pika_half_blink
-  #define CURRENT_SMILE_BLINK pika_smile_blink
-  #define CURRENT_TALK_20 pika_talk_20
-  #define CURRENT_TALK_60 pika_talk_60
-  #define CURRENT_TALK_100 pika_talk_100
-  #define CURRENT_TALK_BLINK pika_talk_blink
-  #define CURRENT_SMILE pika_smile
-  #define CAMEO_FRAME_COUNT 7
-#else
-  #define CURRENT_IDLE avatar_idle
-  #define CURRENT_HALF_BLINK avatar_half_blink
-  #define CURRENT_SMILE_BLINK avatar_smile_blink
-  #define CURRENT_TALK_20 avatar_talk_20
-  #define CURRENT_TALK_60 avatar_talk_60
-  #define CURRENT_TALK_100 avatar_talk_100
-  #define CURRENT_TALK_BLINK avatar_talk_blink
-  #define CURRENT_SMILE avatar_smile
-  #define CAMEO_FRAME_COUNT 5
-#endif
+#define CURRENT_IDLE pika_idle
+#define CURRENT_HALF_BLINK pika_half_blink
+#define CURRENT_SMILE_BLINK pika_smile_blink
+#define CURRENT_TALK_20 pika_talk_20
+#define CURRENT_TALK_60 pika_talk_60
+#define CURRENT_TALK_100 pika_talk_100
+#define CURRENT_TALK_BLINK pika_talk_blink
+#define CURRENT_SMILE pika_smile
+#define CAMEO_FRAME_COUNT 7
+
+// Sleep animation frame macros
+#define CURRENT_SLEEP_1 pika_sleep_1
+#define CURRENT_SLEEP_2 pika_sleep_2
+#define CURRENT_SLEEP_SMILE pika_sleep_smile
+#define CURRENT_SLEEP_PARTIAL pika_sleep_partial
+#define CURRENT_SLEEP_NEUTRAL_1 pika_sleep_neutral_1
+#define CURRENT_SLEEP_NEUTRAL_2 pika_sleep_neutral_2
 
 bool isRecording = false;
 bool alarmFlashState = false;
@@ -234,6 +250,7 @@ const long gmtOffset_sec = 6 * 3600;
 const int daylightOffset_sec = 0;
 
 void drawClockFace();
+void drawSleepClockOverlay(TFT_eSprite &spr);
 void drawIdleOverlay();
 void drawListeningOverlay();
 void drawThinkingOverlay();
@@ -243,6 +260,7 @@ void drawWaveFrame();
 void dissolveWipe(uint16_t targetColor);
 void drawRemindersPage();
 void drawTimerPage();
+void drawSleepSummaryPage();
 
 void setupI2S() {
   i2s_config_t i2s_config = {
@@ -279,15 +297,94 @@ void setAppState(AppState newState) {
     }
 
     
+    // Shrink sprite and play waking transition when leaving sleep states
+    if (oldState == STATE_SLEEPING || oldState == STATE_SLEEPING_PREWAKE) {
+      tft.fillScreen(COLOR_BG); // Clear full screen to wipe sleep border/layout
+      
+      // Draw waking transition on the full 128x160 canvas
+      faceSprite.fillSprite(COLOR_BG);
+      pushThemedImage(faceSprite, 0, 0, 128, 160, CURRENT_SLEEP_NEUTRAL_1);
+      faceSprite.pushSprite(0, 0);
+      delay(400);
+      
+      faceSprite.fillSprite(COLOR_BG);
+      pushThemedImage(faceSprite, 0, 0, 128, 160, CURRENT_SLEEP_NEUTRAL_2);
+      faceSprite.pushSprite(0, 0);
+      delay(400);
+
+      // Now shrink sprite back to 128x110 for normal clocks and speech bubbles
+      faceSprite.deleteSprite();
+      faceSprite.createSprite(128, 110);
+    }
+    
     // Dissolve only on button press (Clock → Waving Intro) — skip for greeting and routine transitions
     if (oldState == STATE_CLOCK && currentState == STATE_WAVING_INTRO && !greetingMode) {
       dissolveWipe(COLOR_BG);
     }
     
-    // Clear screen depending on target state
+    // Clear screen depending on target state and handle sleep/wake tracking
     if (currentState == STATE_CLOCK) {
       tft.fillScreen(COLOR_BG);
       drawClockFace();
+      lastPirMotionMs = millis();
+      clockStateEnteredMs = millis(); // Track when we entered the active clock state
+      nextCameoTriggerMs = millis() + random(300000, 600000); // Cooldown of 5-10 mins to prevent instant peaking on wake
+      
+      // If waking up from sleep, notify the server
+      if (oldState == STATE_SLEEPING || oldState == STATE_SLEEPING_PREWAKE) {
+        if (client.connected()) {
+          client.print("PIR:WAKE\n");
+        }
+        Serial.println("PIR: Woke up fully. Notification sent to server.");
+      }
+    } else if (currentState == STATE_SLEEPING) {
+      // Falling asleep transition: normal ear -> drooped ear
+      if (oldState == STATE_CLOCK) {
+        faceSprite.fillSprite(COLOR_BG);
+        pushThemedImage(faceSprite, 0, 0, 128, 128, CURRENT_SLEEP_NEUTRAL_2);
+        faceSprite.pushSprite(0, 0);
+        delay(500);
+        
+        faceSprite.fillSprite(COLOR_BG);
+        pushThemedImage(faceSprite, 0, 0, 128, 128, CURRENT_SLEEP_NEUTRAL_1);
+        faceSprite.pushSprite(0, 0);
+        delay(500);
+      }
+      
+      // Enlarge faceSprite to full screen (128x160) for sleeping
+      faceSprite.deleteSprite();
+      faceSprite.createSprite(128, 160);
+      
+      tft.fillScreen(COLOR_BG);
+      // Custom HUD Border Outline for sleeping screen
+      tft.drawRect(2, 2, 124, 156, COLOR_BORDER);
+      tft.drawRect(4, 4, 120, 152, COLOR_BG);
+      
+      // Initialize sleep animation state variables
+      sleepAnimState = 0; // normal loop
+      lastSleepAnimUpdateMs = millis();
+      sleepFrameToggle = false;
+      nextSleepSmileTriggerMs = millis() + random(15000, 30000); // 15-30s first trigger
+      lastSleepClockUpdateMs = 0; // force clock draw instantly
+      
+      // Notify server we went to sleep and start keep-alive heartbeat timer
+      if (client.connected()) {
+        client.print("PIR:SLEEP\n");
+      }
+      lastSleepHeartbeatMs = millis();
+      lastSleepEnteredMs = millis(); // Track when we entered sleep for motion cooldown
+      Serial.println("PIR: Went to sleep. Notification sent to server.");
+    } else if (currentState == STATE_SLEEPING_PREWAKE) {
+      preWakeEnteredMs = millis();
+      preWakeRisingEdges = 1; // The motion triggering pre-wake counts as the first wave
+      lastSleepClockUpdateMs = 0; // force sleep clock redraw
+      
+      // Notify server we entered pre-wake standby
+      if (client.connected()) {
+        client.print("PIR:PREWAKE\n");
+      }
+      Serial.println("PIR: Entered pre-wake standby. Notification sent to server.");
+      // Do not clear the screen, keep it black/themed with the existing sleeping HUD outline
     } else if (currentState == STATE_TIMER || currentState == STATE_TIMER_PAUSED || currentState == STATE_TIMER_FINISHED || currentState == STATE_REMINDERS) {
       // Full-screen states need a complete clear
       tft.fillScreen(COLOR_BG);
@@ -338,12 +435,16 @@ void setAppState(AppState newState) {
 void drawAvatar() {
   const uint16_t* frameData = CURRENT_IDLE;
   
-  if (currentState == STATE_TIMER_FINISHED) {
-    #if ACTIVE_THEME == THEME_PIKACHU
-      frameData = (waveFrame % 2 == 0) ? pika_wave_1 : pika_wave_2; // Waving high
-    #else
-      frameData = (waveFrame % 2 == 0) ? avatar_wave_1 : avatar_wave_2;
-    #endif
+  if (currentState == STATE_SLEEPING) {
+    if (sleepAnimState == 3) {
+      frameData = CURRENT_SLEEP_SMILE;
+    } else {
+      frameData = sleepFrameToggle ? CURRENT_SLEEP_2 : CURRENT_SLEEP_1;
+    }
+  } else if (currentState == STATE_SLEEPING_PREWAKE) {
+    frameData = CURRENT_SLEEP_PARTIAL;
+  } else if (currentState == STATE_TIMER_FINISHED) {
+    frameData = (waveFrame % 2 == 0) ? pika_wave_1 : pika_wave_2; // Waving high
   } else if (currentState == STATE_SPEAKING || currentState == STATE_ALARM) {
     if (currentState == STATE_ALARM) {
       frameData = CURRENT_TALK_100; // Wide open mouth for alarm shocked face
@@ -372,7 +473,12 @@ void drawAvatar() {
   // Draw avatar to sprite and push with flashing background if in Alarm state
   uint16_t bgCol = ((currentState == STATE_ALARM || currentState == STATE_TIMER_FINISHED) && alarmFlashState) ? TFT_RED : COLOR_BG;
   faceSprite.fillSprite(bgCol);
-  pushThemedImage(faceSprite, 0, 0, 128, 128, frameData);
+  if (currentState == STATE_SLEEPING || currentState == STATE_SLEEPING_PREWAKE) {
+    pushThemedImage(faceSprite, 0, 0, 128, 160, frameData);
+    drawSleepClockOverlay(faceSprite);
+  } else {
+    pushThemedImage(faceSprite, 0, 0, 128, 128, frameData);
+  }
   faceSprite.pushSprite(shakeX, shakeY);
 }
 
@@ -382,7 +488,6 @@ void drawCameoFrame() {
   int h = 0;
   int yPos = 0;
 
-#if ACTIVE_THEME == THEME_PIKACHU
   // Cameo frames for Pikachu: peek 1->2->3->4->3->2->1 (frame indices 1 to 7)
   if (cameoFrame == 1 || cameoFrame == 7) {
     frameData = pika_cameo_1;
@@ -401,22 +506,6 @@ void drawCameoFrame() {
     h = 128;
     yPos = 32;
   }
-#else
-  // Cameo frames for Girl: head 1->2->3->2->1 (frame indices 1 to 5)
-  if (cameoFrame == 1 || cameoFrame == 5) {
-    frameData = avatar_cameo_1;
-    h = 57;
-    yPos = 103;
-  } else if (cameoFrame == 2 || cameoFrame == 4) {
-    frameData = avatar_cameo_2;
-    h = 89;
-    yPos = 71;
-  } else if (cameoFrame == 3) {
-    frameData = avatar_cameo_3;
-    h = 119;
-    yPos = 41;
-  }
-#endif
 
   if (frameData != NULL) {
     // Clear the vertical region occupied by the cameo
@@ -433,14 +522,10 @@ void drawCameoFrame() {
 
 void drawWaveFrame() {
   const uint16_t* frameData = NULL;
-#if ACTIVE_THEME == THEME_PIKACHU
   // wave 1->2->3->2->3->1 (indices 0 to 5)
   if (waveFrame == 0 || waveFrame == 5) frameData = pika_wave_1;
   else if (waveFrame == 1 || waveFrame == 3) frameData = pika_wave_2;
   else frameData = pika_wave_3;
-#else
-  frameData = (waveFrame % 2 == 0) ? avatar_wave_1 : avatar_wave_2;
-#endif
 
   if (frameData != NULL) {
     faceSprite.fillSprite(COLOR_BG);
@@ -585,6 +670,34 @@ void drawClockFace() {
   }
 }
 
+void drawSleepClockOverlay(TFT_eSprite &spr) {
+  struct tm timeinfo;
+  if (getLocalTime(&timeinfo, 100)) {
+    char timeStr[16];
+    strftime(timeStr, sizeof(timeStr), "%I:%M %p", &timeinfo);
+    
+    int textWidth = strlen(timeStr) * 6; // 6px per character at size 1
+    int boxWidth = textWidth + 14;      // Space for padding and status dot
+    int boxHeight = 14;
+    int x = 124 - boxWidth;              // 4px margin from right edge
+    int y = 6;                          // 6px margin from top edge
+    
+    // Draw high-tech status capsule bubble
+    spr.fillRoundRect(x, y, boxWidth, boxHeight, 3, COLOR_BUBBLE_BG);
+    spr.drawRoundRect(x, y, boxWidth, boxHeight, 3, COLOR_BORDER);
+    
+    // Draw a blinking/pulsing heart monitor dot
+    uint16_t dotColor = (millis() % 1000 < 500) ? TFT_ORANGE : COLOR_ACCENT;
+    spr.fillCircle(x + 6, y + 7, 2, dotColor);
+    
+    // Print time text
+    spr.setTextColor(COLOR_ACCENT, COLOR_BUBBLE_BG);
+    spr.setTextSize(1);
+    spr.setCursor(x + 12, y + 4);
+    spr.print(timeStr);
+  }
+}
+
 void drawIdleOverlay() {
   struct tm timeinfo;
   if (!getLocalTime(&timeinfo, 100)) {
@@ -630,6 +743,50 @@ void drawIdleOverlay() {
 void updateAnimations() {
   unsigned long now = millis();
   
+  if (currentState == STATE_SLEEPING || currentState == STATE_SLEEPING_PREWAKE) {
+    // 1. Redraw when the minute changes to keep the clock overlay updated
+    struct tm timeinfo;
+    if (getLocalTime(&timeinfo, 100)) {
+      static int lastMin = -1;
+      if (timeinfo.tm_min != lastMin) {
+        lastMin = timeinfo.tm_min;
+        needRedraw = true;
+      }
+    }
+    
+    // 2. Sleeping loop animations (only in main sleeping state)
+    if (currentState == STATE_SLEEPING) {
+      if (sleepAnimState == 3) {
+        // Smiling state: return to normal breathing loop after 3 seconds
+        if (now - sleepSmileStartMs > 3000) {
+          sleepAnimState = 0;
+          needRedraw = true;
+        }
+      } else {
+        // Trigger occasional sleep smile
+        if (now > nextSleepSmileTriggerMs) {
+          sleepAnimState = 3; // smile
+          sleepSmileStartMs = now;
+          nextSleepSmileTriggerMs = now + random(20000, 45000); // next smile in 20-45s
+          needRedraw = true;
+        } 
+        // Swap sleep_1 and sleep_2 every 1500ms to simulate breathing
+        else if (now - lastSleepAnimUpdateMs > 1500) {
+          sleepFrameToggle = !sleepFrameToggle;
+          lastSleepAnimUpdateMs = now;
+          needRedraw = true;
+        }
+      }
+    }
+    
+    // Draw the avatar sprite if redraw is triggered
+    if (needRedraw) {
+      drawAvatar();
+      needRedraw = false;
+    }
+    return;
+  }
+  
   // 1. CLOCK FACE STATE Updates
   if (currentState == STATE_CLOCK) {
     if (now - lastClockUpdateMs > 1000) {
@@ -659,8 +816,12 @@ void updateAnimations() {
     }
     
     if (now > nextCameoTriggerMs) {
-      setAppState(STATE_CAMEO);
-      nextCameoTriggerMs = now + random(45000, 90000);
+      // Only trigger cameo peaking if we have been continuously in STATE_CLOCK for >= 45 seconds,
+      // and only with a 15% probability. This makes the peaking animation a super rare Easter egg.
+      if ((now - clockStateEnteredMs >= 45000) && (random(0, 100) < 15)) {
+        setAppState(STATE_CAMEO);
+      }
+      nextCameoTriggerMs = now + random(300000, 600000); // Cooldown of 5 to 10 minutes
     }
     return;
   }
@@ -671,11 +832,7 @@ void updateAnimations() {
     
     if (elapsed > 150) {
       // Pause at full-peek for 1 second
-#if ACTIVE_THEME == THEME_PIKACHU
       if (cameoFrame == 4 && elapsed < 1000) return;
-#else
-      if (cameoFrame == 3 && elapsed < 1000) return;
-#endif
       
       cameoFrame++;
       cameoFrameStartMs = now;
@@ -695,12 +852,8 @@ void updateAnimations() {
     unsigned long elapsed = now - waveFrameStartMs;
     
     if (elapsed > 300) {
-      waveFrame = (waveFrame == 0) ? 1 : 0;
-      
-#if ACTIVE_THEME == THEME_PIKACHU
       // Advance wave frame index: 0->1->2->3->4->5 (wave cycle mapping)
       waveFrame = (waveCycleCount + 1) % 6;
-#endif
       
       waveFrameStartMs = now;
       waveCycleCount++;
@@ -871,6 +1024,10 @@ void updateAnimations() {
       drawRemindersPage();
     } else if (currentState == STATE_TIMER || currentState == STATE_TIMER_PAUSED) {
       drawTimerPage();
+    } else if (currentState == STATE_SLEEPING) {
+      // Do nothing, screen is kept black
+    } else if (currentState == STATE_SLEEP_SUMMARY) {
+      drawSleepSummaryPage();
     } else {
       drawAvatar();
       
@@ -1198,6 +1355,78 @@ void drawTimerPage() {
   }
 }
 
+void drawSleepSummaryPage() {
+  // Clear the content area (preserve border by only clearing inner region)
+  tft.fillRect(5, 5, 118, 150, COLOR_BG);
+  
+  // Borders
+  tft.drawRect(2, 2, 124, 156, COLOR_BORDER);
+  tft.drawRect(4, 4, 120, 152, COLOR_BG);
+  
+  // Title - capsule-shaped header
+  tft.fillRoundRect(8, 8, 112, 16, 3, COLOR_BUBBLE_BG);
+  tft.drawRoundRect(8, 8, 112, 16, 3, COLOR_BORDER);
+  tft.setTextColor(COLOR_ACCENT, COLOR_BUBBLE_BG);
+  tft.setTextSize(1);
+  String title = sleepSummaryType + " Summary";
+  title.toUpperCase();
+  int titleW = title.length() * 6;
+  tft.setCursor((128 - titleW) / 2, 12);
+  tft.print(title);
+  
+  // Duration display (Large text in center)
+  tft.setTextColor(COLOR_TEXT, COLOR_BG);
+  tft.setTextSize(2);
+  char durStr[16];
+  snprintf(durStr, sizeof(durStr), "%.1fh", sleepSummaryDuration);
+  int durW = strlen(durStr) * 12;
+  tft.setCursor((128 - durW) / 2, 34);
+  tft.print(durStr);
+  tft.setTextSize(1);
+  tft.setTextColor(COLOR_ACCENT, COLOR_BG);
+  tft.setCursor((128 - (8 * 6)) / 2, 52);
+  tft.print("DURATION");
+  
+  tft.drawLine(10, 64, 118, 64, COLOR_BORDER);
+  
+  // Stats block
+  tft.setTextColor(COLOR_TEXT, COLOR_BG);
+  
+  // Movements
+  tft.setCursor(10, 72);
+  tft.print("Movements: ");
+  tft.setTextColor(COLOR_ACCENT, COLOR_BG);
+  tft.print(sleepSummaryMovements);
+  
+  // Noise level (RMS)
+  tft.setTextColor(COLOR_TEXT, COLOR_BG);
+  tft.setCursor(10, 88);
+  tft.print("Noise Avg: ");
+  tft.setTextColor(COLOR_ACCENT, COLOR_BG);
+  tft.printf("%.0f", sleepSummaryAvgNoise);
+  
+  // LDR Light level
+  tft.setTextColor(COLOR_TEXT, COLOR_BG);
+  tft.setCursor(10, 104);
+  tft.print("Room Ldr : ");
+  tft.setTextColor(COLOR_ACCENT, COLOR_BG);
+  tft.print(sleepSummaryAvgLdr);
+  
+  tft.drawLine(10, 118, 118, 118, COLOR_BORDER);
+  
+  // Quality rating capsule at bottom
+  tft.fillRoundRect(10, 126, 108, 20, 3, COLOR_BUBBLE_BG);
+  tft.drawRoundRect(10, 126, 108, 20, 3, COLOR_BORDER);
+  
+  tft.setTextSize(1);
+  String qualStr = "Quality: " + sleepSummaryQuality;
+  qualStr.toUpperCase();
+  int qualW = qualStr.length() * 6;
+  tft.setTextColor(COLOR_TEXT, COLOR_BUBBLE_BG);
+  tft.setCursor((128 - qualW) / 2, 132);
+  tft.print(qualStr);
+}
+
 
 
 void setup() {
@@ -1207,12 +1436,18 @@ void setup() {
   pinMode(BUTTON_PIN, INPUT_PULLUP);
   pinMode(BOOT_BTN, INPUT_PULLUP);  // BOOT button for text pagination
   pinMode(BUZZER_PIN, OUTPUT);
+  pinMode(PIR_PIN, INPUT_PULLDOWN);
   digitalWrite(BUZZER_PIN, LOW);
+  
+  lastPirMotionMs = millis();
   
   // Setup LEDC channel 0 for buzzer/speaker
   ledcSetup(0, 1000, 8);  // channel 0, 1kHz base, 8-bit resolution
   ledcAttachPin(BUZZER_PIN, 0);
   ledcWriteTone(0, 0);    // Silent by default
+
+  // PIR Motion Sensor
+  pinMode(PIR_PIN, INPUT);
 
   tft.init();
   tft.setRotation(2); // Rotate to Portrait 128x160
@@ -1228,8 +1463,8 @@ void setup() {
   tft.setCursor(10, 10);
   tft.println("Connecting...");
 
-  // Allocate themedBuf on heap (32KB would overflow static RAM with sprites)
-  themedBuf = (uint16_t *)malloc(128 * 128 * sizeof(uint16_t));
+  // Allocate themedBuf on heap (sized to support up to 128x160 full-screen sleep sprites)
+  themedBuf = (uint16_t *)malloc(128 * 160 * sizeof(uint16_t));
   if (!themedBuf) {
     Serial.println("[FATAL] themedBuf alloc failed");
     while(1) delay(1000);
@@ -1266,6 +1501,158 @@ void setup() {
 
 void loop() {
   updateAnimations();
+
+  // Read PIR sensor (HC-SR501 on PIR_PIN = 27)
+  bool pirRawState = (digitalRead(PIR_PIN) == HIGH);
+  unsigned long currentMs = millis();
+  
+  static unsigned long pirTransitionToHighMs = 0;
+  static bool debouncedPirState = false;
+  
+  // Software validation/debounce check:
+  // Since a real PIR motion trigger stays HIGH for at least 2.5 seconds (the minimum hardware time delay),
+  // brief pulses that go back to LOW in less than 200ms are filtered out as RF/Power noise.
+  if (pirRawState) {
+    if (pirTransitionToHighMs == 0) {
+      pirTransitionToHighMs = currentMs; // Start tracking transition to HIGH
+    } else if (currentMs - pirTransitionToHighMs >= 200) {
+      debouncedPirState = true; // Confirmed motion event (sustained HIGH)
+    }
+  } else {
+    pirTransitionToHighMs = 0;
+    debouncedPirState = false;
+  }
+  
+  bool pirState = debouncedPirState; // Use debounced state for transitions and logs
+  static bool lastPirState = false;
+  static unsigned long lastPirMsgSentMs = 0;
+  
+  // Track LOW -> HIGH transitions (rising edge)
+  bool risingEdge = (pirState && !lastPirState);
+  lastPirState = pirState;
+  
+  if (pirState) {
+    lastPirMotionMs = currentMs; // update motion timer
+  }
+
+  // Track 30-second motion history (sampled once per second)
+  static bool motionHistory[30] = {false};
+  static int historyIdx = 0;
+  static unsigned long lastHistorySampleMs = 0;
+  
+  if (currentMs - lastHistorySampleMs >= 1000) {
+    lastHistorySampleMs = currentMs;
+    motionHistory[historyIdx] = pirState; // Sample the debounced PIR state
+    historyIdx = (historyIdx + 1) % 30;
+  }
+  
+  // Count seconds of motion in the last 30 seconds
+  int motionSeconds = 0;
+  for (int i = 0; i < 30; i++) {
+    if (motionHistory[i]) {
+      motionSeconds++;
+    }
+  }
+
+  // --- SLEEP / WAKE STATE MACHINE LOGIC (added for sleep monitoring foundation) ---
+  if (currentState == STATE_CLOCK) {
+    // Sleep transition condition:
+    // 1. Continuous time in Clock State > 30s (must be in clock for 30s)
+    // 2. Light level is dark (LDR < 500)
+    // 3. PIR is mostly motionless (motion detected in <= 3 seconds of the last 30 seconds)
+    if ((currentMs - clockStateEnteredMs > 30000) && 
+        (cachedLdr < 500) && 
+        (motionSeconds <= 3)) {
+      setAppState(STATE_SLEEPING);
+      Serial.println("PIR: In Clock state, dark, and mostly motionless. Entering SLEEPING state.");
+    }
+  } 
+  else if (currentState == STATE_SLEEPING) {
+    // Sample LDR during sleep every 10 seconds and send to the server to monitor optimal light conditions
+    static unsigned long lastSleepLdrMs = 0;
+    if (currentMs - lastSleepLdrMs > 10000) {
+      lastSleepLdrMs = currentMs;
+      i2s_stop(I2S_NUM_0);
+      i2s_adc_disable(I2S_NUM_0);
+      cachedLdr = analogRead(LDR_PIN);
+      i2s_adc_enable(I2S_NUM_0);
+      i2s_start(I2S_NUM_0);
+      if (client.connected()) {
+        client.print("LDR:" + String(cachedLdr) + "\n");
+      }
+    }
+
+    // 1. Send sleep heartbeat command every 15s to keep TCP connection alive
+    if (currentMs - lastSleepHeartbeatMs > 15000) {
+      if (client.connected()) {
+        client.print("PIR:SLEEP\n");
+      }
+      lastSleepHeartbeatMs = currentMs;
+      Serial.println("PIR: Standby heartbeat keep-alive sent to server.");
+    }
+    
+    // 2. Any motion (rising edge) triggers the pre-wake standby state, but ignore motion during the first 20s grace period
+    if (risingEdge && (currentMs - lastSleepEnteredMs > 20000)) {
+      setAppState(STATE_SLEEPING_PREWAKE);
+      Serial.println("PIR: Motion detected. Entering pre-wake standby.");
+    }
+  } 
+  else if (currentState == STATE_SLEEPING_PREWAKE) {
+    // In Pre-Wake: Screen remains black, but audio/keyword streaming is enabled
+    bool fullyWakeUp = false;
+    
+    // Confirmation Trigger A: Motion held HIGH continuously for >= 2.0 seconds
+    if (pirState && (currentMs - preWakeEnteredMs >= 2000)) {
+      fullyWakeUp = true;
+      Serial.println("PIR: Confirmed wakeup - Motion held for 2 seconds.");
+    }
+    
+    // Confirmation Trigger B: Second distinct wave (rising edge) during the window
+    if (risingEdge) {
+      preWakeRisingEdges++;
+      Serial.printf("PIR: Wave detected in pre-wake. Edge count: %d\n", preWakeRisingEdges);
+      // Notify companion server of the additional motion event during sleep pre-wake
+      if (client.connected()) {
+        client.print("PIR:MOTION\n");
+      }
+      if (preWakeRisingEdges >= 2) {
+        fullyWakeUp = true;
+        Serial.println("PIR: Confirmed wakeup - Second distinct wave detected.");
+      }
+    }
+    
+    // Pre-wake 10-second timeout
+    if (currentMs - preWakeEnteredMs > 10000) {
+      // Pre-wake expired without confirmation trigger -> go straight back to sleep
+      setAppState(STATE_SLEEPING);
+      Serial.println("PIR: Pre-wake timed out without confirmation. Returning to SLEEPING.");
+    } 
+    else if (fullyWakeUp) {
+      // Fully woke up to clock state (resets sleep timers)
+      setAppState(STATE_CLOCK);
+    }
+  }
+  else if (currentState == STATE_SLEEP_SUMMARY) {
+    if (currentMs - sleepSummaryStartMs > 15000) {
+      setAppState(STATE_CLOCK);
+    }
+    if (digitalRead(BUTTON_PIN) == LOW) {
+      delay(200); // debounce
+      setAppState(STATE_CLOCK);
+    }
+  }
+  
+  // Periodic Debug Logs for calibration (modified to include Pre-Wake status, LDR, and motion density)
+  static unsigned long lastDebugPrintMs = 0;
+  if ((currentState == STATE_CLOCK || currentState == STATE_SLEEPING || currentState == STATE_SLEEPING_PREWAKE) && (currentMs - lastDebugPrintMs > 3000)) {
+    lastDebugPrintMs = currentMs;
+    long timeSinceLastMotion = (long)(currentMs - lastPirMotionMs);
+    const char* stateStr = "CLOCK";
+    if (currentState == STATE_SLEEPING) stateStr = "SLEEPING";
+    else if (currentState == STATE_SLEEPING_PREWAKE) stateStr = "PREWAKE";
+    Serial.printf("[DEBUG] PIR Pin: %d | Motion Density: %d/30s | LDR: %d | Time since last motion: %ld ms | State: %s\n", 
+                  pirState, motionSeconds, cachedLdr, timeSinceLastMotion, stateStr);
+  }
 
   if (!client.connected()) {
     unsigned long now = millis();
@@ -1404,7 +1791,7 @@ void loop() {
   // Stream Audio continuously when in clock, idle, listening, alarm, or timer states
   // Timer states need audio for voice-based cancel commands
   // We use non-blocking I2S reading (timeout 0) so animations remain smooth
-  bool shouldStream = (currentState == STATE_CLOCK || currentState == STATE_IDLE || currentState == STATE_LISTENING || currentState == STATE_ALARM || currentState == STATE_TIMER || currentState == STATE_TIMER_PAUSED || currentState == STATE_TIMER_FINISHED);
+  bool shouldStream = (currentState == STATE_CLOCK || currentState == STATE_IDLE || currentState == STATE_LISTENING || currentState == STATE_ALARM || currentState == STATE_TIMER || currentState == STATE_TIMER_PAUSED || currentState == STATE_TIMER_FINISHED || currentState == STATE_SLEEPING || currentState == STATE_SLEEPING_PREWAKE);
   size_t bytes_read = 0;
   
   static uint16_t raw_accumulator[512]; 
@@ -1487,6 +1874,34 @@ void loop() {
         // Guard: do NOT reset to clock if a timer is actively counting down, paused, or finished
         if (currentState != STATE_TIMER && currentState != STATE_TIMER_PAUSED && currentState != STATE_TIMER_FINISHED) {
           setAppState(STATE_CLOCK);
+        }
+      }
+      else if (response == "CMD:START_SLEEP") {
+        setAppState(STATE_SLEEPING);
+        Serial.println("[CMD] Manual sleep command received from server.");
+      }
+      else if (response.startsWith("UI_SLEEP_SUMMARY:")) {
+        // Format: UI_SLEEP_SUMMARY:type:duration:movements:avg_noise:avg_ldr:quality
+        int firstColon = response.indexOf(':', 17);
+        int secondColon = response.indexOf(':', firstColon + 1);
+        int thirdColon = response.indexOf(':', secondColon + 1);
+        int fourthColon = response.indexOf(':', thirdColon + 1);
+        int fifthColon = response.indexOf(':', fourthColon + 1);
+        
+        if (firstColon != -1 && secondColon != -1 && thirdColon != -1 && fourthColon != -1 && fifthColon != -1) {
+          sleepSummaryType = response.substring(17, firstColon);
+          sleepSummaryDuration = response.substring(firstColon + 1, secondColon).toFloat();
+          sleepSummaryMovements = response.substring(secondColon + 1, thirdColon).toInt();
+          sleepSummaryAvgNoise = response.substring(thirdColon + 1, fourthColon).toFloat();
+          sleepSummaryAvgLdr = response.substring(fourthColon + 1, fifthColon).toInt();
+          sleepSummaryQuality = response.substring(fifthColon + 1);
+          
+          sleepSummaryType.trim();
+          sleepSummaryQuality.trim();
+          
+          sleepSummaryStartMs = millis();
+          setAppState(STATE_SLEEP_SUMMARY);
+          Serial.println("[Sleep Monitor] Displaying sleep summary page.");
         }
       }
       else if (response.startsWith("TIMER_START:")) {

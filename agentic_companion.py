@@ -54,7 +54,10 @@ Your answers are displayed on a 160x128 pixel screen.
 You MUST be extremely concise. Keep every answer under 15 words. 
 Do not use markdown formatting. You MUST NOT use any emojis or emoticons in your responses.
 
-You have the ability to manage reminders and alarms.
+You have the ability to manage reminders, alarms, and sleep tracking.
+- If the user says they are going to sleep, taking a nap, or tell you to enter sleep/nap mode, append: [CMD:START_SLEEP]
+  Example: "I am taking a nap" -> "Goodnight! Sweet dreams. [CMD:START_SLEEP]"
+  Example: "Going to sleep now" -> "Goodnight! Sleep well. [CMD:START_SLEEP]"
 - EXPLICIT TIME (absolute): [CMD:ADD_REMINDER|task|ABS|time]
   Examples: "remind me at 3pm" → "Added. [CMD:ADD_REMINDER|Reminder|ABS|3:00 PM]"
   "remind me to study database at 9pm" → "Added. [CMD:ADD_REMINDER|study database|ABS|9:00 PM]"
@@ -564,6 +567,16 @@ def alarm_scheduler():
             
         time.sleep(5)
 
+def log_sleep_event(event_name):
+    """Helper to log sleep and wake transitions to sleep_sessions.log for future sleep monitoring analysis."""
+    try:
+        log_path = os.path.join(RECORDINGS_DIR, "sleep_sessions.log")
+        ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(f"{ts}\t{event_name}\n")
+    except Exception as e:
+        print(f"[Error] Failed to write to sleep_sessions.log: {e}")
+
 # --- CLIENT SOCKET HANDLER ---
 class VoiceAgentHandler:
     def __init__(self, conn, addr):
@@ -588,6 +601,12 @@ class VoiceAgentHandler:
         # Enable TCP_NODELAY to avoid Nagle delays on small state commands
         self.conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         self.timer_running = False
+        self.last_pir_state = 'AWAKE' # Track client sleep states (AWAKE, SLEEPING, PREWAKE)
+        # Sleep monitoring session variables
+        self.sleep_start_time = None
+        self.sleep_movement_count = 0
+        self.sleep_noise_levels = []
+        self.sleep_noise_events = 0
         
     def calibrate(self):
         print(f"[*] Calibrating noise baseline for {self.addr}...")
@@ -970,6 +989,10 @@ class VoiceAgentHandler:
                             ldr_str = cmd_bytes.decode('utf-8', errors='ignore').strip()
                             ldr_value = int(ldr_str.split(":")[1])
                             print(f"[*] LDR: {ldr_value} (0-4095)")
+                            # Track LDR levels during sleep session
+                            if hasattr(self, 'sleep_start_time') and self.sleep_start_time is not None:
+                                if hasattr(self, 'sleep_ldr_levels'):
+                                    self.sleep_ldr_levels.append(ldr_value)
                         except Exception:
                             pass
                         self.recv_buffer = bytearray(after)
@@ -996,11 +1019,79 @@ class VoiceAgentHandler:
                         self.recv_buffer = bytearray(after)
                         processing = True
                         continue
+                    
+                    # Try to extract PIR:MOTION
+                    result = self._extract_command(self.recv_buffer, b"PIR:MOTION")
+                    if result:
+                        before, cmd_bytes, after = result
+                        if before:
+                            audio_chunks.append(bytes(before))
+                        print("[PIR] Motion detected")
+                        # Track motion during sleep
+                        if hasattr(self, 'sleep_movement_count'):
+                            self.sleep_movement_count += 1
+                        self.recv_buffer = bytearray(after)
+                        processing = True
+                        continue
+
+                    # Try to extract PIR:WAKE (Device woke up fully due to motion/button/voice)
+                    result = self._extract_command(self.recv_buffer, b"PIR:WAKE")
+                    if result:
+                        before, cmd_bytes, after = result
+                        if before:
+                            audio_chunks.append(bytes(before))
+                        self.last_pir_state = 'AWAKE'
+                        print("[PIR] Device woke up fully.")
+                        log_sleep_event("WAKE")
+                        # End Sleep Monitoring Session and save to JSON
+                        self.end_sleep_session()
+                        self.recv_buffer = bytearray(after)
+                        processing = True
+                        continue
+
+                    # Try to extract PIR:SLEEP (Device went to sleep)
+                    result = self._extract_command(self.recv_buffer, b"PIR:SLEEP")
+                    if result:
+                        before, cmd_bytes, after = result
+                        if before:
+                            audio_chunks.append(bytes(before))
+                        # Only log the transition to sleep to avoid spamming on keep-alive heartbeats
+                        if self.last_pir_state != 'SLEEPING':
+                            self.last_pir_state = 'SLEEPING'
+                            print("[PIR] Device went to sleep.")
+                            log_sleep_event("SLEEP")
+                            # Start Sleep Monitoring Session
+                            if not hasattr(self, 'sleep_start_time') or self.sleep_start_time is None:
+                                self.sleep_start_time = time.time()
+                                self.sleep_movement_count = 0
+                                self.sleep_noise_levels = []
+                                self.sleep_noise_events = 0
+                                print(f"[Sleep Monitor] Session started at {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+                        self.recv_buffer = bytearray(after)
+                        processing = True
+                        continue
+
+                    # Try to extract PIR:PREWAKE (Device entered pre-wake standby)
+                    result = self._extract_command(self.recv_buffer, b"PIR:PREWAKE")
+                    if result:
+                        before, cmd_bytes, after = result
+                        if before:
+                            audio_chunks.append(bytes(before))
+                        if self.last_pir_state != 'PREWAKE':
+                            self.last_pir_state = 'PREWAKE'
+                            print("[PIR] Device entered pre-wake standby.")
+                            log_sleep_event("PREWAKE")
+                            # Increment movement count during sleep (entering pre-wake counts as a movement)
+                            if hasattr(self, 'sleep_movement_count'):
+                                self.sleep_movement_count += 1
+                        self.recv_buffer = bytearray(after)
+                        processing = True
+                        continue
                 
                 # Check if recv_buffer has a partial command marker at the tail
                 # that might be completed by the next recv() call
                 tail = bytes(self.recv_buffer)
-                partial_markers = [b"CMD:", b"___END___", b"LDR:", b"TIMER_DONE"]
+                partial_markers = [b"CMD:", b"___END___", b"LDR:", b"TIMER_DONE", b"PIR:"]
                 safe_len = len(tail)
                 for marker in partial_markers:
                     # Check if the tail ends with any prefix of a marker
@@ -1020,6 +1111,19 @@ class VoiceAgentHandler:
                     if chunk:
                         self.keyword_buffer.extend(chunk)
                         
+                        # Real-time Sleep Monitor: Calculate audio RMS during sleep states
+                        if self.last_pir_state in ('SLEEPING', 'PREWAKE'):
+                            align_len = len(chunk) - (len(chunk) % 2)
+                            if align_len >= 2:
+                                samples = np.frombuffer(chunk[:align_len], dtype=np.int16)
+                                if len(samples) > 0:
+                                    rms = float(np.sqrt(np.mean(samples.astype(np.float64)**2)))
+                                    if hasattr(self, 'sleep_noise_levels'):
+                                        self.sleep_noise_levels.append(rms)
+                                        # Threshold for noise spikes (coughing, snoring, tossing, door closing)
+                                        if rms > 600.0:
+                                            self.sleep_noise_events += 1
+                        
                         if self.is_awake and time.time() >= self.speech_ready_time:
                             if self.first_audio_time == 0:
                                 self.first_audio_time = time.time()
@@ -1038,6 +1142,98 @@ class VoiceAgentHandler:
         print(f"[-] Client {self.addr} disconnected")
         if active_conn == self.conn:
             active_conn = None
+        self.end_sleep_session()
+            
+    def end_sleep_session(self):
+        if hasattr(self, 'sleep_start_time') and self.sleep_start_time is not None:
+            end_time = time.time()
+            duration = end_time - self.sleep_start_time
+            duration_hours = duration / 3600.0
+            
+            # Discard very brief sessions under 30 minutes
+            if duration_hours < 0.5:
+                print(f"[Sleep Monitor] Discarding short sleep session of {duration/60.0:.1f} minutes")
+                self.sleep_start_time = None
+                return
+                
+            # Classify session type: actual_sleep or nap
+            # Threshold: >= 4 hours -> actual_sleep. Otherwise, check if start_time hour is in preferred sleep hours.
+            # Default preferred sleeping hours: 10 PM (22) to 8 AM (8)
+            session_type = "nap"
+            if duration_hours >= 4.0:
+                session_type = "actual_sleep"
+            else:
+                start_dt = datetime.datetime.fromtimestamp(self.sleep_start_time)
+                if start_dt.hour >= 22 or start_dt.hour < 8:
+                    session_type = "actual_sleep"
+            
+            display_type = "Sleep" if session_type == "actual_sleep" else "Nap"
+            
+            # Calculate average and max noise
+            if self.sleep_noise_levels:
+                avg_noise = float(np.mean(self.sleep_noise_levels))
+                max_noise = float(np.max(self.sleep_noise_levels))
+            else:
+                avg_noise = 0.0
+                max_noise = 0.0
+                
+            # Calculate average LDR light levels
+            if hasattr(self, 'sleep_ldr_levels') and self.sleep_ldr_levels:
+                avg_ldr = float(np.mean(self.sleep_ldr_levels))
+            else:
+                # If LDR was not streamed (e.g. bright command start or offline), default to quiet room level
+                avg_ldr = 150.0
+                
+            # Classify Sleep Quality: Good, Fair, Poor
+            movements_per_hour = self.sleep_movement_count / duration_hours
+            if movements_per_hour <= 2.0 and avg_noise <= 300.0 and avg_ldr <= 500.0:
+                quality = "Good"
+            elif movements_per_hour > 5.0 or avg_noise > 600.0 or avg_ldr > 1200.0:
+                quality = "Poor"
+            else:
+                quality = "Fair"
+                
+            session_data = {
+                "session_id": datetime.datetime.fromtimestamp(self.sleep_start_time).strftime("%Y%m%d_%H%M%S"),
+                "type": session_type,
+                "start_time": datetime.datetime.fromtimestamp(self.sleep_start_time).strftime("%Y-%m-%d %H:%M:%S"),
+                "end_time": datetime.datetime.fromtimestamp(end_time).strftime("%Y-%m-%d %H:%M:%S"),
+                "duration_hours": round(duration_hours, 2),
+                "movement_count": self.sleep_movement_count,
+                "average_noise": round(avg_noise, 1),
+                "max_noise": round(max_noise, 1),
+                "noise_events": self.sleep_noise_events,
+                "average_ldr": round(avg_ldr, 1),
+                "quality": quality
+            }
+            
+            # Send summary command back to client (ESP32)
+            try:
+                # Format: UI_SLEEP_SUMMARY:type:duration:movements:avg_noise:avg_ldr:quality
+                summary_cmd = f"UI_SLEEP_SUMMARY:{display_type}:{duration_hours:.1f}:{self.sleep_movement_count}:{avg_noise:.0f}:{avg_ldr:.0f}:{quality}\n"
+                self.safe_send(summary_cmd.encode())
+                print(f"[Sleep Monitor] Sent summary to ESP32: {summary_cmd.strip()}")
+            except Exception as e:
+                print(f"[Sleep Monitor] Failed to send sleep summary to client: {e}")
+            
+            # Save to JSON
+            file_path = "sleep_sessions.json"
+            try:
+                sessions = []
+                if os.path.exists(file_path):
+                    try:
+                        with open(file_path, "r", encoding="utf-8") as f:
+                            sessions = json.load(f)
+                    except Exception:
+                        sessions = []
+                sessions.append(session_data)
+                with open(file_path, "w", encoding="utf-8") as f:
+                    json.dump(sessions, f, indent=2)
+                print(f"[Sleep Monitor] Saved session to {file_path}: {session_data}")
+            except Exception as e:
+                print(f"[Sleep Monitor Error] Failed to save session: {e}")
+                
+            self.sleep_start_time = None
             
     def process_speech(self, audio_bytes, total_duration):
         global active_alarm_active
@@ -1220,6 +1416,7 @@ class VoiceAgentHandler:
         delete_match = re.search(r'\[CMD:DELETE_REMINDER\|(\d+)\]', ai_answer)
         list_match = '[CMD:LIST_REMINDERS]' in ai_answer
         clear_match = '[CMD:CLEAR_REMINDERS]' in ai_answer
+        sleep_cmd_match = '[CMD:START_SLEEP]' in ai_answer
         
         # Strip commands from message sent to user
         clean_answer = re.sub(r'\[CMD:[^\]]+\]', '', ai_answer).strip()
@@ -1260,6 +1457,21 @@ class VoiceAgentHandler:
             elif clear_match:
                 clear_reminders()
                 self.safe_send(f"UI_MSG:{clean_answer}\n".encode())
+                
+            elif sleep_cmd_match:
+                # Send Goodnight speech first
+                header = f"UI_MSG:{clean_answer}\n".encode()
+                speak_on_esp32(self.conn, clean_answer, header=header)
+                # Send start sleep command to client (ESP32)
+                self.safe_send(b"CMD:START_SLEEP\n")
+                # Initialize Sleep Monitoring Session
+                self.last_pir_state = 'SLEEPING'
+                self.sleep_start_time = time.time()
+                self.sleep_movement_count = 0
+                self.sleep_noise_levels = []
+                self.sleep_noise_events = 0
+                self.sleep_ldr_levels = []
+                print(f"[Sleep Monitor] Manual sleep session triggered via voice command.")
                 
             else:
                 # Send display text + TTS atomically (no interleaving between UI_MSG and AUDIO)

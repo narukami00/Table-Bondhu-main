@@ -6,33 +6,30 @@
 
 | Area | Value | Evidence |
 |------|-------|----------|
-| Primary language | Python (3.8+), C++ (Arduino) | [requirements.txt](file:///F:/__KUET%20CSE22/Assignments/IOT/Table-Bondhu-main/requirements.txt), [gemini_LLM_btn/gemini_LLM_btn.ino](file:///F:/__KUET%20CSE22/Assignments/IOT/Table-Bondhu-main/gemini_LLM_btn/gemini_LLM_btn.ino) |
-| Runtime + version | Python 3, ESP32 Core for Arduino (v2.x+) | [agentic_companion.py](file:///F:/__KUET%20CSE22/Assignments/IOT/Table-Bondhu-main/agentic_companion.py), [.vscode/arduino.json](file:///F:/__KUET%20CSE22/Assignments/IOT/Table-Bondhu-main/.vscode/arduino.json) |
-| Package manager | pip (Python), Arduino Library Manager | [requirements.txt](file:///F:/__KUET%20CSE22/Assignments/IOT/Table-Bondhu-main/requirements.txt), [gemini_LLM_btn/gemini_LLM_btn.ino](file:///F:/__KUET%20CSE22/Assignments/IOT/Table-Bondhu-main/gemini_LLM_btn/gemini_LLM_btn.ino#L3) |
-| Module/build system | Standard Python Interpreter, Arduino Build System (GCC/G++) | [agentic_companion.py](file:///F:/__KUET%20CSE22/Assignments/IOT/Table-Bondhu-main/agentic_companion.py), [.vscode/arduino.json](file:///F:/__KUET%20CSE22/Assignments/IOT/Table-Bondhu-main/.vscode/arduino.json) |
+| Primary language | Python, C++ (Arduino sketch) | [agentic_companion.py](file:///F:/__KUET%20CSE22/Assignments/IOT/Table-Bondhu-main/agentic_companion.py), [gemini_LLM_btn.ino](file:///F:/__KUET%20CSE22/Assignments/IOT/Table-Bondhu-main/gemini_LLM_btn/gemini_LLM_btn.ino) |
+| Runtime + version | Python 3.8+, ESP32 Arduino Core | [requirements.txt](file:///F:/__KUET%20CSE22/Assignments/IOT/Table-Bondhu-main/requirements.txt), [.vscode/arduino.json](file:///F:/__KUET%20CSE22/Assignments/IOT/Table-Bondhu-main/.vscode/arduino.json) |
+| Package manager | pip (Python), Arduino Library Manager | [requirements.txt](file:///F:/__KUET%20CSE22/Assignments/IOT/Table-Bondhu-main/requirements.txt) |
+| Module/build system | Standard python runtime, Arduino CLI / IDE | [SETUP.md](file:///F:/__KUET%20CSE22/Assignments/IOT/Table-Bondhu-main/SETUP.md) |
 
 ### 2) Production Frameworks and Dependencies
 
+List only high-impact production dependencies (frameworks, data, transport, auth).
+
 | Dependency | Version | Role in system | Evidence |
 |------------|---------|----------------|----------|
-| `google-generativeai` | Not pinned | Google Gemini API Client SDK for cloud LLM response generation | [requirements.txt](file:///F:/__KUET%20CSE22/Assignments/IOT/Table-Bondhu-main/requirements.txt) |
-| `python-dotenv` | Not pinned | Parses `.env` configuration file to load API keys | [requirements.txt](file:///F:/__KUET%20CSE22/Assignments/IOT/Table-Bondhu-main/requirements.txt) |
-| `onnx-asr` | Not pinned | Local speech-to-text ASR transcriber | [requirements.txt](file:///F:/__KUET%20CSE22/Assignments/IOT/Table-Bondhu-main/requirements.txt) |
-| `SpeechRecognition` | Not pinned | Google Web Speech Recognition API wrapper | [requirements.txt](file:///F:/__KUET%20CSE22/Assignments/IOT/Table-Bondhu-main/requirements.txt) |
-| `numpy` | Not pinned | Processing raw audio sample byte arrays | [requirements.txt](file:///F:/__KUET%20CSE22/Assignments/IOT/Table-Bondhu-main/requirements.txt) |
-| `sherpa-onnx` | Not pinned | Offline speech denoising and enhancement using GTCRN model | [requirements.txt](file:///F:/__KUET%20CSE22/Assignments/IOT/Table-Bondhu-main/requirements.txt) |
-| `gTTS` | Not pinned | Google Text-to-Speech library used to synthesize responses | [agentic_companion.py](file:///F:/__KUET%20CSE22/Assignments/IOT/Table-Bondhu-main/agentic_companion.py#L17) |
-| `pydub` | Not pinned | Appends silence pads and shifts sample rates of audio files | [agentic_companion.py](file:///F:/__KUET%20CSE22/Assignments/IOT/Table-Bondhu-main/agentic_companion.py#L18) |
-| `TFT_eSPI` | Library Version | High-speed graphic driver library for ST7735 LCD displays | [gemini_LLM_btn/gemini_LLM_btn.ino](file:///F:/__KUET%20CSE22/Assignments/IOT/Table-Bondhu-main/gemini_LLM_btn/gemini_LLM_btn.ino#L3) |
-| `WiFi.h` | ESP32 Core | Standard library for Wi-Fi station connectivity | [gemini_LLM_btn/gemini_LLM_btn.ino](file:///F:/__KUET%20CSE22/Assignments/IOT/Table-Bondhu-main/gemini_LLM_btn/gemini_LLM_btn.ino#L4) |
-| `driver/i2s.h` | ESP32 Core | Driver for non-blocking I2S microphone audio sampling | [gemini_LLM_btn/gemini_LLM_btn.ino](file:///F:/__KUET%20CSE22/Assignments/IOT/Table-Bondhu-main/gemini_LLM_btn/gemini_LLM_btn.ino#L6) |
+| `python-dotenv` | [TODO] Unpinned | Environment variable loader | [requirements.txt](file:///F:/__KUET%20CSE22/Assignments/IOT/Table-Bondhu-main/requirements.txt) |
+| `onnx-asr` | [TODO] Unpinned | ONNX model wrapper for Parakeet ASR speech transcription | [requirements.txt](file:///F:/__KUET%20CSE22/Assignments/IOT/Table-Bondhu-main/requirements.txt) |
+| `numpy` | [TODO] Unpinned | Array manipulation for audio preprocessing | [requirements.txt](file:///F:/__KUET%20CSE22/Assignments/IOT/Table-Bondhu-main/requirements.txt) |
+| `sherpa-onnx` | [TODO] Unpinned | Offline TTS runtime using Piper models | [requirements.txt](file:///F:/__KUET%20CSE22/Assignments/IOT/Table-Bondhu-main/requirements.txt) |
+| `gTTS` | [TODO] Unpinned | Fallback Google Text-to-Speech library | [requirements.txt](file:///F:/__KUET%20CSE22/Assignments/IOT/Table-Bondhu-main/requirements.txt) |
+| `pydub` | [TODO] Unpinned | Audio manipulation and pitch adjustment | [requirements.txt](file:///F:/__KUET%20CSE22/Assignments/IOT/Table-Bondhu-main/requirements.txt) |
+| `TFT_eSPI` | [TODO] Unpinned | Arduino TFT LCD driver library | [gemini_LLM_btn.ino](file:///F:/__KUET%20CSE22/Assignments/IOT/Table-Bondhu-main/gemini_LLM_btn/gemini_LLM_btn.ino#L2) |
 
 ### 3) Development Toolchain
 
 | Tool | Purpose | Evidence |
 |------|---------|----------|
-| Arduino IDE / CLI | Compiling, verifying, and flashing firmware sketches | [.vscode/arduino.json](file:///F:/__KUET%20CSE22/Assignments/IOT/Table-Bondhu-main/.vscode/arduino.json) |
-| VS Code Arduino Extension | Compiling and uploading sketches directly in VS Code | [.vscode/extensions.json](file:///F:/__KUET%20CSE22/Assignments/IOT/Table-Bondhu-main/.vscode/extensions.json) |
+| VS Code / Arduino IDE | Code editing and firmware compilation/uploading | [.vscode/arduino.json](file:///F:/__KUET%20CSE22/Assignments/IOT/Table-Bondhu-main/.vscode/arduino.json) |
 
 ### 4) Key Commands
 
@@ -40,24 +37,21 @@
 # Install Python dependencies
 pip install -r requirements.txt
 
-# Start the agentic companion server
+# Run the Python server
 python agentic_companion.py
+
+# Run diagnostic check for LM Studio LLM connection
+python check_api.py
 ```
 
 ### 5) Environment and Config
 
-- **Config sources**:
-  - [.env](file:///F:/__KUET%20CSE22/Assignments/IOT/Table-Bondhu-main/.env): Stores Google Gemini API key.
-  - [gemini_LLM_btn/config.h](file:///F:/__KUET%20CSE22/Assignments/IOT/Table-Bondhu-main/gemini_LLM_btn/config.h): WiFi credentials (`WIFI_SSID`, `WIFI_PASSWORD`) and companion server socket parameters (`SERVER_IP`, `SERVER_PORT`).
-- **Required env vars**:
-  - `GEMINI_API_KEY`: API Key to authenticate Generative AI completions.
-- **Deployment/runtime constraints**:
-  - Requires Windows OS (uses native `winsound` loop for alarm audio playback on laptop/desktop speakers).
-  - ESP32 hardware requires INMP441 I2S microphone (ADC on GPIO 32) and ST7735 IPS display.
+- Config sources: `gemini_LLM_btn/config.h` (WiFi SSID, password, server IP, port, GMT offset) and `.env` (LLM, ASR model paths on server).
+- Required env vars: `[TODO]` (No env template found in repo, but code indicates `.env` holds config for ASR/TTS paths if necessary; check `agentic_companion.py`).
+- Deployment/runtime constraints: Python server requires Windows for `winsound` audio output. ESP32 client requires specific pin connections for SPI TFT (ST7735/ST7789), I2S Microphone (GPIO 32), active buzzer (GPIO 13), LDR sensor (GPIO 34), and PIR sensor (GPIO 27).
 
 ### 6) Evidence
 
 - [requirements.txt](file:///F:/__KUET%20CSE22/Assignments/IOT/Table-Bondhu-main/requirements.txt)
-- [agentic_companion.py](file:///F:/__KUET%20CSE22/Assignments/IOT/Table-Bondhu-main/agentic_companion.py)
 - [gemini_LLM_btn/config.h](file:///F:/__KUET%20CSE22/Assignments/IOT/Table-Bondhu-main/gemini_LLM_btn/config.h)
-- [gemini_LLM_btn/gemini_LLM_btn.ino](file:///F:/__KUET%20CSE22/Assignments/IOT/Table-Bondhu-main/gemini_LLM_btn/gemini_LLM_btn.ino)
+- [SETUP.md](file:///F:/__KUET%20CSE22/Assignments/IOT/Table-Bondhu-main/SETUP.md)
