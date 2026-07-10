@@ -46,6 +46,8 @@ active_handler = None
 active_alarm_active = False
 active_alarm_name = ""
 alarm_fired_at = None
+scheduled_sleep_time = None
+scheduled_sleep_checked_today = False
 send_lock = threading.Lock()  # Prevents interleaved sends from multiple threads
 chat_lock = threading.Lock()  # Protects chat_session across threads
 
@@ -303,11 +305,29 @@ def play_speech_on_laptop(text):
         
         # Fallback to Google TTS (requires internet) if offline TTS failed or is uninitialized
         if sound is None:
-            tts = gTTS(text=text, lang='en', slow=False)
-            mp3_buf = io.BytesIO()
-            tts.write_to_fp(mp3_buf)
-            mp3_buf.seek(0)
-            sound = AudioSegment.from_mp3(mp3_buf)
+            try:
+                tts = gTTS(text=text, lang='en', slow=False)
+                mp3_buf = io.BytesIO()
+                tts.write_to_fp(mp3_buf)
+                mp3_buf.seek(0)
+                sound = AudioSegment.from_mp3(mp3_buf)
+            except Exception as gtts_err:
+                print(f"[Warning] Google TTS conversion failed: {gtts_err}")
+        
+        # If still None (e.g., missing ffmpeg/dependencies on Windows), fall back to native Windows SAPI5
+        if sound is None:
+            if sys.platform.startswith('win'):
+                try:
+                    import win32com.client
+                    speaker = win32com.client.Dispatch("SAPI.SpVoice")
+                    speaker.Rate = 2  # slightly faster to sound cute
+                    speaker.Speak(text, 1) # SVSFlagsAsync = 1
+                    words = len(text.split())
+                    duration_sec = max(2.0, words / 2.5)
+                    print(f"[SAPI5 TTS] Speaking natively: '{text}' ({duration_sec:.1f}s)")
+                    return duration_sec
+                except Exception as sapi_err:
+                    print(f"[SAPI5 TTS Error] {sapi_err}")
         
         # --- PIKACHU VOICE EFFECT (PITCH & SPEED SHIFT) ---
         # Speed up and pitch up by 40% (creates a cute, high-pitched tone)
@@ -587,7 +607,7 @@ def format_duration(seconds):
         return f"{h} hours and {m} minutes" if m > 0 else f"{h} hours"
 
 def alarm_scheduler():
-    global active_alarm_active, active_alarm_name, active_conn, alarm_fired_at
+    global active_alarm_active, active_alarm_name, active_conn, alarm_fired_at, scheduled_sleep_time, scheduled_sleep_checked_today, active_handler
     print("[*] Alarm scheduler active.")
     pending_alarms = []    # Alarms to send after releasing db_lock
     
@@ -609,6 +629,40 @@ def alarm_scheduler():
                         except Exception:
                             pass
             
+            # --- SCHEDULED SLEEP CHECKER ---
+
+            if scheduled_sleep_time:
+                now_hm = now.strftime("%H:%M")
+                if now_hm == scheduled_sleep_time:
+                    if not scheduled_sleep_checked_today:
+                        scheduled_sleep_checked_today = True
+                        print(f"[Sleep Schedule] Target time {scheduled_sleep_time} reached! Checking room status...")
+                        
+                        if active_handler:
+                            last_ldr = getattr(active_handler, 'last_ldr_val', 500)
+                            last_motion = getattr(active_handler, 'last_motion_time', time.time())
+                            time_since_motion = time.time() - last_motion
+                            
+                            print(f"[Sleep Schedule] Current LDR: {last_ldr} | Time since motion: {time_since_motion:.1f}s")
+                            
+                            # Dark room (< 200 LDR) and idle for >= 5 minutes (300s)
+                            if last_ldr < 200 and time_since_motion >= 300:
+                                print("[Sleep Schedule] Conditions MET. Triggering sleep automatically!")
+                                active_handler.sleep_start_time = time.time()
+                                active_handler.sleep_movement_count = 0
+                                active_handler.sleep_noise_levels = []
+                                active_handler.sleep_noise_events = 0
+                                active_handler.sleep_ldr_levels = [last_ldr]
+                                active_handler.last_pir_state = 'SLEEPING'
+                                try:
+                                    active_conn.sendall(b"CMD:START_SLEEP\n")
+                                except Exception:
+                                    pass
+                            else:
+                                print("[Sleep Schedule] Conditions NOT met (room bright or motion detected). Waiting for actual sleep start later...")
+                else:
+                    scheduled_sleep_checked_today = False
+
             # Atomic load-check-save under db_lock
             pending_alarms = []
             with db_lock:
@@ -687,6 +741,8 @@ class VoiceAgentHandler:
         self.conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         self.timer_running = False
         self.last_pir_state = 'AWAKE' # Track client sleep states (AWAKE, SLEEPING, PREWAKE)
+        self.last_ldr_val = 500
+        self.last_motion_time = time.time()
         # Sleep monitoring session variables
         self.sleep_start_time = None
         self.sleep_movement_count = 0
@@ -1074,6 +1130,7 @@ class VoiceAgentHandler:
                         try:
                             ldr_str = cmd_bytes.decode('utf-8', errors='ignore').strip()
                             ldr_value = int(ldr_str.split(":")[1])
+                            self.last_ldr_val = ldr_value
                             print(f"[*] LDR: {ldr_value} (0-4095)")
                             # Track LDR levels during sleep session
                             if hasattr(self, 'sleep_start_time') and self.sleep_start_time is not None:
@@ -1113,6 +1170,7 @@ class VoiceAgentHandler:
                         if before:
                             audio_chunks.append(bytes(before))
                         print("[PIR] Motion detected")
+                        self.last_motion_time = time.time()
                         # Track motion during sleep
                         if hasattr(self, 'sleep_movement_count'):
                             self.sleep_movement_count += 1
@@ -1238,22 +1296,16 @@ class VoiceAgentHandler:
             duration = end_time - self.sleep_start_time
             duration_hours = duration / 3600.0
             
-            # Discard very brief sessions under 30 minutes
-            if duration_hours < 0.5:
+            # Discard very brief sessions under 10 minutes
+            if duration < 600.0:
                 print(f"[Sleep Monitor] Discarding short sleep session of {duration/60.0:.1f} minutes")
                 self.sleep_start_time = None
                 return
                 
-            # Classify session type: actual_sleep or nap
-            # Threshold: >= 4 hours -> actual_sleep. Otherwise, check if start_time hour is in preferred sleep hours.
-            # Default preferred sleeping hours: 10 PM (22) to 8 AM (8)
+            # Classify session type: Sleep (>= 3 hours) or Nap (< 3 hours)
             session_type = "nap"
-            if duration_hours >= 4.0:
+            if duration_hours >= 3.0:
                 session_type = "actual_sleep"
-            else:
-                start_dt = datetime.datetime.fromtimestamp(self.sleep_start_time)
-                if start_dt.hour >= 22 or start_dt.hour < 8:
-                    session_type = "actual_sleep"
             
             display_type = "Sleep" if session_type == "actual_sleep" else "Nap"
             
@@ -1269,7 +1321,6 @@ class VoiceAgentHandler:
             if hasattr(self, 'sleep_ldr_levels') and self.sleep_ldr_levels:
                 avg_ldr = float(np.mean(self.sleep_ldr_levels))
             else:
-                # If LDR was not streamed (e.g. bright command start or offline), default to quiet room level
                 avg_ldr = 150.0
                 
             # Classify Sleep Quality: Good, Fair, Poor
@@ -1281,6 +1332,21 @@ class VoiceAgentHandler:
             else:
                 quality = "Fair"
                 
+            # Calculate tardiness if scheduled_sleep_time is active
+            tardiness_mins = 0
+            global scheduled_sleep_time
+            if scheduled_sleep_time and session_type == "actual_sleep":
+                try:
+                    sh, sm = map(int, scheduled_sleep_time.split(":"))
+                    start_dt = datetime.datetime.fromtimestamp(self.sleep_start_time)
+                    scheduled_dt = start_dt.replace(hour=sh, minute=sm, second=0, microsecond=0)
+                    if start_dt.hour < 12 and sh >= 12:
+                        scheduled_dt = scheduled_dt - datetime.timedelta(days=1)
+                    if start_dt > scheduled_dt:
+                        tardiness_mins = int((start_dt - scheduled_dt).total_seconds() / 60)
+                except Exception as e:
+                    print(f"[Warning] Failed to calculate tardiness: {e}")
+
             session_data = {
                 "session_id": datetime.datetime.fromtimestamp(self.sleep_start_time).strftime("%Y%m%d_%H%M%S"),
                 "type": session_type,
@@ -1292,7 +1358,8 @@ class VoiceAgentHandler:
                 "max_noise": round(max_noise, 1),
                 "noise_events": self.sleep_noise_events,
                 "average_ldr": round(avg_ldr, 1),
-                "quality": quality
+                "quality": quality,
+                "tardiness_minutes": tardiness_mins
             }
             
             # Send summary command back to client (ESP32)
@@ -1638,7 +1705,7 @@ class CompanionRestHandler(BaseHTTPRequestHandler):
             self.wfile.write(json.dumps({"error": "Not Found"}).encode('utf-8'))
 
     def do_POST(self):
-        global active_conn, active_handler, chat_session
+        global active_conn, active_handler, chat_session, scheduled_sleep_time
         content_length = int(self.headers['Content-Length'])
         post_data = self.rfile.read(content_length)
         
@@ -1656,6 +1723,28 @@ class CompanionRestHandler(BaseHTTPRequestHandler):
 
             print(f"[REST Chat] Message from app: '{message}'")
             
+            # 1. Intercept timer countdown setup
+            clean_msg = re.sub(r'[^\w\s]', '', message.lower()).strip()
+            is_timer_query = any(w in clean_msg for w in ["timer", "countdown", "focus"])
+            is_stop_intent = any(w in clean_msg for w in ["stop", "cancel", "quit", "dismiss", "terminate", "shut up", "stop it"])
+            
+            if is_timer_query and not is_stop_intent:
+                duration = parse_timer_duration(clean_msg)
+                if duration is not None:
+                    if active_handler:
+                        active_handler.timer_running = True
+                    if active_conn:
+                        try:
+                            active_conn.sendall(f"TIMER_START:{duration}\n".encode())
+                        except Exception:
+                            pass
+                    response_text = f"Starting focus countdown for {format_duration(duration)}."
+                    play_speech_on_laptop(response_text)
+                    self._set_headers(200)
+                    self.wfile.write(json.dumps({"response": response_text}).encode('utf-8'))
+                    return
+
+            # 2. Process LLM message
             if active_handler:
                 try:
                     active_handler.safe_send(b"UI_STATE:THINKING\n")
@@ -1681,6 +1770,83 @@ class CompanionRestHandler(BaseHTTPRequestHandler):
                 self._set_headers(200)
                 self.wfile.write(json.dumps({"response": clean_answer}).encode('utf-8'))
             except Exception as e:
+                self._set_headers(500)
+                self.wfile.write(json.dumps({"error": str(e)}).encode('utf-8'))
+
+        elif self.path == '/api/voice_chat':
+            audio_b64 = data.get("audio", "")
+            if not audio_b64:
+                self._set_headers(400)
+                self.wfile.write(json.dumps({"error": "Empty audio data"}).encode('utf-8'))
+                return
+
+            print("[REST Voice Chat] Received audio upload from app. Processing ASR...")
+            try:
+                import base64
+                audio_bytes = base64.b64decode(audio_b64)
+                temp_path = "temp_app_voice.wav"
+                with open(temp_path, "wb") as f:
+                    f.write(audio_bytes)
+
+                # Load and resample using pydub
+                sound = AudioSegment.from_file(temp_path)
+                sound = sound.set_frame_rate(16000).set_channels(1).set_sample_width(2)
+                audio_samples = np.frombuffer(sound.raw_data, dtype=np.int16).astype(np.float32) / 32768.0
+
+                text = asr_model.recognize(audio_samples, sample_rate=16000).strip()
+                print(f"[REST Voice Chat] Transcribed: '{text}'")
+
+                if not text:
+                    self._set_headers(200)
+                    self.wfile.write(json.dumps({"text": "", "response": "Could not recognize speech. Please try speaking clearer."}).encode('utf-8'))
+                    return
+
+                # Intercept countdown query in voice
+                clean_msg = re.sub(r'[^\w\s]', '', text.lower()).strip()
+                is_timer_query = any(w in clean_msg for w in ["timer", "countdown", "focus"])
+                is_stop_intent = any(w in clean_msg for w in ["stop", "cancel", "quit", "dismiss", "terminate", "shut up", "stop it"])
+                
+                if is_timer_query and not is_stop_intent:
+                    duration = parse_timer_duration(clean_msg)
+                    if duration is not None:
+                        if active_handler:
+                            active_handler.timer_running = True
+                        if active_conn:
+                            try:
+                                active_conn.sendall(f"TIMER_START:{duration}\n".encode())
+                            except Exception:
+                                pass
+                        response_text = f"Starting focus countdown for {format_duration(duration)}."
+                        play_speech_on_laptop(response_text)
+                        self._set_headers(200)
+                        self.wfile.write(json.dumps({"text": text, "response": response_text}).encode('utf-8'))
+                        return
+
+                # Process LLM query
+                if active_handler:
+                    try:
+                        active_handler.safe_send(b"UI_STATE:THINKING\n")
+                    except Exception:
+                        pass
+
+                response = chat_session.send_message(text)
+                ai_answer = response.text.strip()
+                print(f"[REST Voice Chat] AI Response: {ai_answer}")
+
+                if active_handler:
+                    active_handler.handle_llm_response(ai_answer)
+                else:
+                    clean_answer = re.sub(r'\[CMD:[^\]]+\]', '', ai_answer).strip()
+                    clean_answer = re.sub(r'[\U00010000-\U0010ffff]', '', clean_answer).strip()
+                    play_speech_on_laptop(clean_answer)
+
+                clean_answer = re.sub(r'\[CMD:[^\]]+\]', '', ai_answer).strip()
+                clean_answer = re.sub(r'[\U00010000-\U0010ffff]', '', clean_answer).strip()
+
+                self._set_headers(200)
+                self.wfile.write(json.dumps({"text": text, "response": clean_answer}).encode('utf-8'))
+            except Exception as e:
+                print(f"[REST Voice Error] {e}")
                 self._set_headers(500)
                 self.wfile.write(json.dumps({"error": str(e)}).encode('utf-8'))
 
@@ -1745,6 +1911,33 @@ class CompanionRestHandler(BaseHTTPRequestHandler):
                     pass
             self._set_headers(200)
             self.wfile.write(json.dumps({"status": "SUCCESS"}).encode('utf-8'))
+
+        elif self.path == '/api/sleep/start':
+            sleep_type = data.get("type", "sleep")
+            print(f"[REST Sleep] Force sleep trigger from app: {sleep_type}")
+            if active_handler:
+                active_handler.sleep_start_time = time.time()
+                active_handler.sleep_movement_count = 0
+                active_handler.sleep_noise_levels = []
+                active_handler.sleep_noise_events = 0
+                active_handler.sleep_ldr_levels = []
+                active_handler.last_pir_state = 'SLEEPING'
+                try:
+                    active_conn.sendall(b"CMD:START_SLEEP\n")
+                except Exception:
+                    pass
+                self._set_headers(200)
+                self.wfile.write(json.dumps({"status": "SUCCESS"}).encode('utf-8'))
+            else:
+                self._set_headers(400)
+                self.wfile.write(json.dumps({"error": "ESP32 desk clock is not connected to the server right now."}).encode('utf-8'))
+
+        elif self.path == '/api/sleep/schedule':
+            time_val = data.get("time", "") # HH:MM
+            scheduled_sleep_time = time_val
+            print(f"[REST Sleep] Configured target bedtime to: {scheduled_sleep_time}")
+            self._set_headers(200)
+            self.wfile.write(json.dumps({"status": "SUCCESS", "scheduled_time": scheduled_sleep_time}).encode('utf-8'))
         else:
             self._set_headers(404)
             self.wfile.write(json.dumps({"error": "Not Found"}).encode('utf-8'))
