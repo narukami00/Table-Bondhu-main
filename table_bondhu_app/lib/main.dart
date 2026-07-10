@@ -42,19 +42,29 @@ class MainNavigationScreen extends StatefulWidget {
 
 class _MainNavigationScreenState extends State<MainNavigationScreen> {
   int _selectedIndex = 0;
+  String _serverIp = "192.168.0.38"; // Central Server IP state
 
-  final List<Widget> _screens = [
-    const ConnectionScreen(),
-    const ChatScreenPlaceholder(),
-    const RemindersScreenPlaceholder(),
-    const TimerScreenPlaceholder(),
-    const SleepScreenPlaceholder(),
-  ];
+  void _onIpConfigured(String newIp) {
+    setState(() {
+      _serverIp = newIp;
+    });
+  }
 
   @override
   Widget build(BuildContext context) {
+    final List<Widget> screens = [
+      ConnectionScreen(
+        initialServerIp: _serverIp,
+        onIpConfigured: _onIpConfigured,
+      ),
+      ChatScreen(serverIp: _serverIp),
+      RemindersScreen(serverIp: _serverIp),
+      TimerScreen(serverIp: _serverIp),
+      SleepScreen(serverIp: _serverIp),
+    ];
+
     return Scaffold(
-      body: SafeArea(child: _screens[_selectedIndex]),
+      body: SafeArea(child: screens[_selectedIndex]),
       bottomNavigationBar: NavigationBar(
         selectedIndex: _selectedIndex,
         onDestinationSelected: (index) {
@@ -73,7 +83,7 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
           ),
           NavigationDestination(
             icon: Icon(Icons.alarm),
-            label: 'Alarms',
+            label: 'Reminders',
           ),
           NavigationDestination(
             icon: Icon(Icons.hourglass_empty),
@@ -81,7 +91,7 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
           ),
           NavigationDestination(
             icon: Icon(Icons.bedtime),
-            label: 'Sleep',
+            label: 'Sleep Logs',
           ),
         ],
       ),
@@ -90,19 +100,26 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
 }
 
 // ==========================================
-// 1. CONNECTION SCREEN (ACTIVE IMPLEMENTATION)
+// 1. CONNECTION SCREEN
 // ==========================================
 class ConnectionScreen extends StatefulWidget {
-  const ConnectionScreen({super.key});
+  final String initialServerIp;
+  final ValueChanged<String> onIpConfigured;
+
+  const ConnectionScreen({
+    super.key,
+    required this.initialServerIp,
+    required this.onIpConfigured,
+  });
 
   @override
   State<ConnectionScreen> createState() => _ConnectionScreenState();
 }
 
 class _ConnectionScreenState extends State<ConnectionScreen> {
-  final _ssidController = TextEditingController(text: "Rafsan's S21");
-  final _passwordController = TextEditingController(text: "12345678");
-  final _serverIpController = TextEditingController(text: "10.25.55.20");
+  late TextEditingController _ssidController;
+  late TextEditingController _passwordController;
+  late TextEditingController _serverIpController;
 
   bool _isProvisioning = false;
   bool _isSearchingBeacon = false;
@@ -111,6 +128,14 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
 
   RawDatagramSocket? _udpSocket;
   StreamSubscription? _udpSubscription;
+
+  @override
+  void initState() {
+    super.initState();
+    _ssidController = TextEditingController(text: "Rafsan's S21");
+    _passwordController = TextEditingController(text: "12345678");
+    _serverIpController = TextEditingController(text: widget.initialServerIp);
+  }
 
   @override
   void dispose() {
@@ -122,12 +147,13 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
   }
 
   void _log(String message) {
-    setState(() {
-      _provisioningLog += "[${DateTime.now().toString().substring(11, 19)}] $message\n";
-    });
+    if (mounted) {
+      setState(() {
+        _provisioningLog += "[${DateTime.now().toString().substring(11, 19)}] $message\n";
+      });
+    }
   }
 
-  // --- UDP Server Discovery ---
   void _startUdpSearch() async {
     setState(() {
       _isSearchingBeacon = true;
@@ -146,12 +172,12 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
             String message = utf8.decode(dg.data).trim();
             _log("Received UDP Broadcast: '$message' from ${dg.address.address}");
             
-            // Check if beacon is matching
             if (message.contains("TABLE_BONDHU_BEACON")) {
               setState(() {
                 _serverIpController.text = dg.address.address;
                 _beaconStatus = "Server Found: ${dg.address.address}";
               });
+              widget.onIpConfigured(dg.address.address);
               _log("Auto-discovered server IP: ${dg.address.address}");
               _stopUdpSearch();
             }
@@ -159,7 +185,6 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
         }
       });
 
-      // Timeout after 15 seconds
       Future.delayed(const Duration(seconds: 15), () {
         if (_isSearchingBeacon) {
           _log("UDP Discovery timeout (15s exceeded).");
@@ -179,12 +204,13 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
   void _stopUdpSearch() {
     _udpSubscription?.cancel();
     _udpSocket?.close();
-    setState(() {
-      _isSearchingBeacon = false;
-    });
+    if (mounted) {
+      setState(() {
+        _isSearchingBeacon = false;
+      });
+    }
   }
 
-  // --- Send Config to ESP32 Web Server ---
   void _sendConfiguration() async {
     final ssid = _ssidController.text.trim();
     final password = _passwordController.text.trim();
@@ -203,7 +229,6 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
     _log("Sending configuration to ESP32 (http://192.168.4.1/setup)...");
 
     try {
-      // POST config values to the ESP32 in Config Mode
       final response = await http.post(
         Uri.parse('http://192.168.4.1/setup'),
         body: {
@@ -215,7 +240,7 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
 
       if (response.statusCode == 200) {
         _log("Success: ESP32 received configuration!");
-        _log("ESP32 Response: ${response.body}");
+        widget.onIpConfigured(ip);
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(content: Text('Provisioning successful! ESP32 restarting...')),
@@ -225,16 +250,18 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
         _log("Error: Server responded with status code ${response.statusCode}");
       }
     } catch (e) {
-      _log("Connection failed: Is your phone connected to the 'Table-Bondhu-Config' WiFi AP?");
+      _log("Connection failed: Is your phone connected to 'Table-Bondhu-Config'?");
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('Failed to connect to ESP32 Access Point.')),
         );
       }
     } finally {
-      setState(() {
-        _isProvisioning = false;
-      });
+      if (mounted) {
+        setState(() {
+          _isProvisioning = false;
+        });
+      }
     }
   }
 
@@ -242,7 +269,7 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Table-Bondhu Config'),
+        title: const Text('Connection Setup'),
         centerTitle: true,
       ),
       body: SingleChildScrollView(
@@ -250,7 +277,6 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            // Status Card
             Card(
               child: Padding(
                 padding: const EdgeInsets.all(16.0),
@@ -264,7 +290,7 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
                     ),
                     const SizedBox(height: 8),
                     Text(
-                      _isSearchingBeacon ? 'Scanning Local Network...' : 'Enter credentials or auto-discover server.',
+                      _isSearchingBeacon ? 'Scanning Local Network...' : 'Configure connection to ESP32 and Python Server',
                       textAlign: TextAlign.center,
                       style: const TextStyle(color: Colors.grey),
                     ),
@@ -273,8 +299,6 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
               ),
             ),
             const SizedBox(height: 16),
-
-            // Form Fields
             TextField(
               controller: _ssidController,
               decoration: const InputDecoration(
@@ -299,6 +323,7 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
                 Expanded(
                   child: TextField(
                     controller: _serverIpController,
+                    onChanged: (val) => widget.onIpConfigured(val.trim()),
                     decoration: const InputDecoration(
                       labelText: 'Python Server IP',
                       border: OutlineInputBorder(),
@@ -323,8 +348,6 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
               ),
             ],
             const SizedBox(height: 20),
-
-            // Action Button
             ElevatedButton(
               onPressed: _isProvisioning ? null : _sendConfiguration,
               style: ElevatedButton.styleFrom(
@@ -337,15 +360,13 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
                   : const Text('Provision ESP32 Device', style: TextStyle(fontWeight: FontWeight.bold)),
             ),
             const SizedBox(height: 24),
-
-            // Logs output
             const Text(
               'Activity Log',
               style: TextStyle(fontWeight: FontWeight.bold, color: Colors.grey),
             ),
             const SizedBox(height: 8),
             Container(
-              height: 150,
+              height: 120,
               padding: const EdgeInsets.all(8),
               decoration: BoxDecoration(
                 color: Colors.black45,
@@ -356,7 +377,7 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
                 reverse: true,
                 child: Text(
                   _provisioningLog.isEmpty ? "Waiting for activity..." : _provisioningLog,
-                  style: const TextStyle(fontFamily: 'monospace', fontSize: 12, color: Colors.green),
+                  style: const TextStyle(fontFamily: 'monospace', fontSize: 11, color: Colors.green),
                 ),
               ),
             ),
@@ -368,108 +389,165 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
 }
 
 // ==========================================
-// 2. CHAT SCREEN (PLACEHOLDER)
+// 2. CHAT SCREEN
 // ==========================================
-class ChatScreenPlaceholder extends StatelessWidget {
-  const ChatScreenPlaceholder({super.key});
+class ChatMessage {
+  final String text;
+  final bool isUser;
+  final DateTime timestamp;
 
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(title: const Text('LLM Voice Chat')),
-      body: Center(
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Icon(Icons.mic, size: 80, color: Theme.of(context).colorScheme.primary.withOpacity(0.5)),
-            const SizedBox(height: 16),
-            const Text(
-              'Voice Chat History & Control',
-              style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
-            ),
-            const SizedBox(height: 8),
-            const Padding(
-              padding: EdgeInsets.symmetric(horizontal: 32),
-              child: Text(
-                'View conversation history with Pikachu, trigger speech generation, or type text commands directly to the desk companion.',
-                textAlign: TextAlign.center,
-                style: TextStyle(color: Colors.grey),
-              ),
-            ),
-            const SizedBox(height: 24),
-            ElevatedButton.icon(
-              onPressed: () {},
-              icon: const Icon(Icons.speaker_phone),
-              label: const Text('Simulate Voice Activation'),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
+  ChatMessage({required this.text, required this.isUser, required this.timestamp});
 }
 
-// ==========================================
-// 3. REMINDERS & ALARMS (PLACEHOLDER)
-// ==========================================
-class RemindersScreenPlaceholder extends StatelessWidget {
-  const RemindersScreenPlaceholder({super.key});
+class ChatScreen extends StatefulWidget {
+  final String serverIp;
+
+  const ChatScreen({super.key, required this.serverIp});
+
+  @override
+  State<ChatScreen> createState() => _ChatScreenState();
+}
+
+class _ChatScreenState extends State<ChatScreen> {
+  final List<ChatMessage> _messages = [];
+  final _messageController = TextEditingController();
+  bool _isLoading = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _messages.add(ChatMessage(
+      text: "Hello! I am Table-Bondhu. How can I help you today?",
+      isUser: false,
+      timestamp: DateTime.now(),
+    ));
+  }
+
+  void _sendMessage() async {
+    final text = _messageController.text.trim();
+    if (text.isEmpty) return;
+
+    _messageController.clear();
+    setState(() {
+      _messages.add(ChatMessage(text: text, isUser: true, timestamp: DateTime.now()));
+      _isLoading = true;
+    });
+
+    try {
+      final response = await http.post(
+        Uri.parse('http://${widget.serverIp}:8888/api/chat'),
+        headers: {'Content-Type': 'application/json'},
+        body: json.encode({'message': text}),
+      ).timeout(const Duration(seconds: 15));
+
+      if (response.statusCode == 200) {
+        final data = json.decode(response.body);
+        final reply = data['response'] ?? "No response received.";
+        setState(() {
+          _messages.add(ChatMessage(text: reply, isUser: false, timestamp: DateTime.now()));
+        });
+      } else {
+        setState(() {
+          _messages.add(ChatMessage(
+            text: "Error: Server returned status code ${response.statusCode}",
+            isUser: false,
+            timestamp: DateTime.now(),
+          ));
+        });
+      }
+    } catch (e) {
+      setState(() {
+        _messages.add(ChatMessage(
+          text: "Connection failed: Please verify that the companion server is running at ${widget.serverIp}:8888",
+          isUser: false,
+          timestamp: DateTime.now(),
+        ));
+      });
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isLoading = false;
+        });
+      }
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('Alarms & Reminders')),
-      body: ListView(
-        padding: const EdgeInsets.all(16.0),
+      appBar: AppBar(
+        title: const Text('LLM Agent Chat'),
+        centerTitle: true,
+      ),
+      body: Column(
         children: [
-          _buildPlaceholderCard(
-            context,
-            'Active Alarm',
-            'Wake up for classes',
-            '07:30 AM (Daily)',
-            Icons.alarm,
-            true,
+          Expanded(
+            child: ListView.builder(
+              padding: const EdgeInsets.all(16),
+              reverse: true,
+              itemCount: _messages.length,
+              itemBuilder: (context, index) {
+                final message = _messages[_messages.length - 1 - index];
+                return _buildChatBubble(message);
+              },
+            ),
           ),
-          _buildPlaceholderCard(
-            context,
-            'Reminder',
-            'Submit IoT Assignment',
-            '02:00 PM (Today)',
-            Icons.task_alt,
-            true,
-          ),
-          _buildPlaceholderCard(
-            context,
-            'Reminder',
-            'Team Meeting',
-            '08:00 PM (Tomorrow)',
-            Icons.people,
-            false,
-          ),
-          const SizedBox(height: 16),
-          FloatingActionButton.extended(
-            onPressed: () {},
-            label: const Text('Add Alarm / Reminder'),
-            icon: const Icon(Icons.add),
+          if (_isLoading)
+            const Padding(
+              padding: EdgeInsets.symmetric(vertical: 8.0),
+              child: Center(child: CircularProgressIndicator()),
+            ),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 8.0, vertical: 4.0),
+            color: Colors.black26,
+            child: Row(
+              children: [
+                Expanded(
+                  child: TextField(
+                    controller: _messageController,
+                    onSubmitted: (_) => _sendMessage(),
+                    decoration: const InputDecoration(
+                      hintText: 'Type your prompt here...',
+                      border: InputBorder.none,
+                      contentPadding: EdgeInsets.symmetric(horizontal: 12),
+                    ),
+                  ),
+                ),
+                IconButton(
+                  icon: const Icon(Icons.send, color: Color(0xFFFEE000)),
+                  onPressed: _sendMessage,
+                ),
+              ],
+            ),
           ),
         ],
       ),
     );
   }
 
-  Widget _buildPlaceholderCard(BuildContext context, String category, String title, String time, IconData icon, bool active) {
-    return Card(
-      margin: const EdgeInsets.only(bottom: 12),
-      child: ListTile(
-        leading: CircleAvatar(
-          backgroundColor: Theme.of(context).colorScheme.primary.withOpacity(0.1),
-          child: Icon(icon, color: Theme.of(context).colorScheme.primary),
+  Widget _buildChatBubble(ChatMessage message) {
+    final isUser = message.isUser;
+    return Align(
+      alignment: isUser ? Alignment.centerRight : Alignment.centerLeft,
+      child: Container(
+        margin: const EdgeInsets.symmetric(vertical: 6),
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+        constraints: BoxConstraints(maxWidth: MediaQuery.of(context).size.width * 0.75),
+        decoration: BoxDecoration(
+          color: isUser ? const Color(0xFFFEE000) : const Color(0xFF2C2C2C),
+          borderRadius: BorderRadius.only(
+            topLeft: const Radius.circular(12),
+            topRight: const Radius.circular(12),
+            bottomLeft: Radius.circular(isUser ? 12 : 0),
+            bottomRight: Radius.circular(isUser ? 0 : 12),
+          ),
         ),
-        title: Text(title, style: const TextStyle(fontWeight: FontWeight.bold)),
-        subtitle: Text('$category • $time', style: const TextStyle(color: Colors.grey)),
-        trailing: Switch(
-          value: active,
-          onChanged: (val) {},
+        child: Text(
+          message.text,
+          style: TextStyle(
+            color: isUser ? Colors.black : Colors.white,
+            fontSize: 15,
+          ),
         ),
       ),
     );
@@ -477,15 +555,331 @@ class RemindersScreenPlaceholder extends StatelessWidget {
 }
 
 // ==========================================
-// 4. COUNTDOWN TIMER (PLACEHOLDER)
+// 3. REMINDERS SCREEN
 // ==========================================
-class TimerScreenPlaceholder extends StatelessWidget {
-  const TimerScreenPlaceholder({super.key});
+class RemindersScreen extends StatefulWidget {
+  final String serverIp;
+
+  const RemindersScreen({super.key, required this.serverIp});
+
+  @override
+  State<RemindersScreen> createState() => _RemindersScreenState();
+}
+
+class _RemindersScreenState extends State<RemindersScreen> {
+  List<dynamic> _reminders = [];
+  bool _isLoading = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _fetchReminders();
+  }
+
+  Future<void> _fetchReminders() async {
+    if (!mounted) return;
+    setState(() {
+      _isLoading = true;
+    });
+
+    try {
+      final response = await http.get(
+        Uri.parse('http://${widget.serverIp}:8888/api/reminders'),
+      ).timeout(const Duration(seconds: 5));
+
+      if (response.statusCode == 200) {
+        setState(() {
+          _reminders = json.decode(response.body);
+        });
+      }
+    } catch (e) {
+      // Fail silently
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isLoading = false;
+        });
+      }
+    }
+  }
+
+  void _addReminder(String task, String dateTimeStr) async {
+    try {
+      final response = await http.post(
+        Uri.parse('http://${widget.serverIp}:8888/api/reminders'),
+        headers: {'Content-Type': 'application/json'},
+        body: json.encode({'task': task, 'time': dateTimeStr}),
+      ).timeout(const Duration(seconds: 5));
+
+      if (response.statusCode == 200) {
+        _fetchReminders();
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Failed to add reminder.')),
+        );
+      }
+    }
+  }
+
+  void _deleteReminder(int index) async {
+    try {
+      final response = await http.post(
+        Uri.parse('http://${widget.serverIp}:8888/api/reminders/delete'),
+        headers: {'Content-Type': 'application/json'},
+        body: json.encode({'index': index}),
+      ).timeout(const Duration(seconds: 5));
+
+      if (response.statusCode == 200) {
+        _fetchReminders();
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Failed to delete reminder.')),
+        );
+      }
+    }
+  }
+
+  void _clearReminders() async {
+    try {
+      final response = await http.post(
+        Uri.parse('http://${widget.serverIp}:8888/api/reminders/clear'),
+      ).timeout(const Duration(seconds: 5));
+
+      if (response.statusCode == 200) {
+        _fetchReminders();
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Failed to clear reminders.')),
+        );
+      }
+    }
+  }
+
+  void _showAddDialog() {
+    final taskController = TextEditingController();
+    final dateController = TextEditingController(text: DateTime.now().toString().substring(0, 10));
+    final timeController = TextEditingController(text: "12:00:00");
+
+    showDialog(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          title: const Text('New Reminder'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(
+                controller: taskController,
+                decoration: const InputDecoration(labelText: 'Task / Alarm Description'),
+              ),
+              TextField(
+                controller: dateController,
+                decoration: const InputDecoration(labelText: 'Date (YYYY-MM-DD)'),
+              ),
+              TextField(
+                controller: timeController,
+                decoration: const InputDecoration(labelText: 'Time (HH:MM:SS)'),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('Cancel'),
+            ),
+            TextButton(
+              onPressed: () {
+                final task = taskController.text.trim();
+                final fullTime = "${dateController.text.trim()} ${timeController.text.trim()}";
+                if (task.isNotEmpty) {
+                  _addReminder(task, fullTime);
+                  Navigator.pop(context);
+                }
+              },
+              child: const Text('Create'),
+            ),
+          ],
+        );
+      },
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('Focus Timer')),
+      appBar: AppBar(
+        title: const Text('Reminders & Alarms'),
+        centerTitle: true,
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.refresh),
+            onPressed: _fetchReminders,
+          ),
+          IconButton(
+            icon: const Icon(Icons.delete_sweep, color: Colors.redAccent),
+            onPressed: _clearReminders,
+            tooltip: 'Clear All',
+          ),
+        ],
+      ),
+      body: _isLoading
+          ? const Center(child: CircularProgressIndicator())
+          : _reminders.isEmpty
+              ? Center(
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Icon(Icons.alarm_off, size: 64, color: Colors.grey.shade600),
+                      const SizedBox(height: 12),
+                      const Text('No alarms or reminders found.', style: TextStyle(color: Colors.grey)),
+                    ],
+                  ),
+                )
+              : ListView.builder(
+                  padding: const EdgeInsets.all(16),
+                  itemCount: _reminders.length,
+                  itemBuilder: (context, index) {
+                    final item = _reminders[index];
+                    final isFired = item['fired'] == true;
+                    return Card(
+                      margin: const EdgeInsets.only(bottom: 12),
+                      child: ListTile(
+                        leading: CircleAvatar(
+                          backgroundColor: Colors.white10,
+                          child: Icon(
+                            isFired ? Icons.alarm_on : Icons.alarm,
+                            color: isFired ? Colors.redAccent : const Color(0xFFFEE000),
+                          ),
+                        ),
+                        title: Text(
+                          item['task'] ?? "Reminder",
+                          style: const TextStyle(fontWeight: FontWeight.bold),
+                        ),
+                        subtitle: Text(
+                          "Time: ${item['display_time'] ?? item['trigger_time']}",
+                          style: const TextStyle(color: Colors.grey),
+                        ),
+                        trailing: IconButton(
+                          icon: const Icon(Icons.delete, color: Colors.grey),
+                          onPressed: () => _deleteReminder(index + 1), // API expects 1-based index
+                        ),
+                      ),
+                    );
+                  },
+                ),
+      floatingActionButton: FloatingActionButton(
+        onPressed: _showAddDialog,
+        backgroundColor: const Color(0xFFFEE000),
+        foregroundColor: Colors.black,
+        child: const Icon(Icons.add),
+      ),
+    );
+  }
+}
+
+// ==========================================
+// 4. FOCUS TIMER
+// ==========================================
+class TimerScreen extends StatefulWidget {
+  final String serverIp;
+
+  const TimerScreen({super.key, required this.serverIp});
+
+  @override
+  State<TimerScreen> createState() => _TimerScreenState();
+}
+
+class _TimerScreenState extends State<TimerScreen> {
+  int _selectedDuration = 1500; // Default 25 minutes
+  Timer? _timer;
+  int _secondsLeft = 0;
+  bool _isRunning = false;
+
+  void _startTimer(int seconds) async {
+    try {
+      final response = await http.post(
+        Uri.parse('http://${widget.serverIp}:8888/api/timer/start'),
+        headers: {'Content-Type': 'application/json'},
+        body: json.encode({'duration': seconds}),
+      ).timeout(const Duration(seconds: 5));
+
+      if (response.statusCode == 200) {
+        _timer?.cancel();
+        setState(() {
+          _secondsLeft = seconds;
+          _isRunning = true;
+        });
+        _timer = Timer.periodic(const Duration(seconds: 1), (timer) {
+          if (mounted) {
+            setState(() {
+              if (_secondsLeft > 0) {
+                _secondsLeft--;
+              } else {
+                _isRunning = false;
+                _timer?.cancel();
+              }
+            });
+          }
+        });
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Failed to start focus timer.')),
+        );
+      }
+    }
+  }
+
+  void _cancelTimer() async {
+    try {
+      final response = await http.post(
+        Uri.parse('http://${widget.serverIp}:8888/api/timer/cancel'),
+      ).timeout(const Duration(seconds: 5));
+
+      if (response.statusCode == 200) {
+        _timer?.cancel();
+        setState(() {
+          _isRunning = false;
+          _secondsLeft = 0;
+        });
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Failed to cancel focus timer.')),
+        );
+      }
+    }
+  }
+
+  String _formatDuration(int totalSeconds) {
+    final m = totalSeconds ~/ 60;
+    final s = totalSeconds % 60;
+    final mStr = m.toString().padLeft(2, '0');
+    final sStr = s.toString().padLeft(2, '0');
+    return "$mStr:$sStr";
+  }
+
+  @override
+  void dispose() {
+    _timer?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Focus Timer Controller'),
+        centerTitle: true,
+      ),
       body: Center(
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
@@ -494,159 +888,276 @@ class TimerScreenPlaceholder extends StatelessWidget {
               alignment: Alignment.center,
               children: [
                 SizedBox(
-                  width: 200,
-                  height: 200,
+                  width: 220,
+                  height: 220,
                   child: CircularProgressIndicator(
-                    value: 0.65,
+                    value: _isRunning && _selectedDuration > 0
+                        ? _secondsLeft / _selectedDuration
+                        : 0.0,
                     strokeWidth: 12,
                     backgroundColor: Colors.white10,
-                    color: Theme.of(context).colorScheme.primary,
+                    color: const Color(0xFFFEE000),
                   ),
                 ),
                 Column(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    const Text(
-                      '16:15',
-                      style: TextStyle(fontSize: 48, fontWeight: FontWeight.bold),
-                    ),
                     Text(
-                      'of 25 mins',
-                      style: TextStyle(color: Colors.grey.shade400),
+                      _isRunning ? _formatDuration(_secondsLeft) : "00:00",
+                      style: const TextStyle(fontSize: 48, fontWeight: FontWeight.bold),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      _isRunning ? 'Focusing...' : 'Ready',
+                      style: TextStyle(color: Colors.grey.shade400, fontWeight: FontWeight.w500),
                     ),
                   ],
                 ),
               ],
             ),
             const SizedBox(height: 48),
-            const Text(
-              'Focus Session: Study Mode',
-              style: TextStyle(fontSize: 18, fontWeight: FontWeight.w500),
-            ),
-            const SizedBox(height: 24),
-            Row(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                IconButton.filledTonal(
-                  onPressed: () {},
-                  icon: const Icon(Icons.pause),
-                  iconSize: 32,
+            if (!_isRunning) ...[
+              const Text('Select Focus Duration:', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+              const SizedBox(height: 16),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  _durationButton(10, '10s (Test)'),
+                  const SizedBox(width: 8),
+                  _durationButton(300, '5m'),
+                  const SizedBox(width: 8),
+                  _durationButton(1500, '25m'),
+                  const SizedBox(width: 8),
+                  _durationButton(3000, '50m'),
+                ],
+              ),
+              const SizedBox(height: 24),
+              ElevatedButton.icon(
+                onPressed: () => _startTimer(_selectedDuration),
+                icon: const Icon(Icons.play_arrow),
+                label: const Text('Start Focus Session', style: TextStyle(fontWeight: FontWeight.bold)),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: const Color(0xFFFEE000),
+                  foregroundColor: Colors.black,
+                  padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
                 ),
-                const SizedBox(width: 24),
-                IconButton.filled(
-                  onPressed: () {},
-                  icon: const Icon(Icons.stop),
-                  iconSize: 32,
-                  style: IconButton.styleFrom(
-                    backgroundColor: Colors.redAccent,
-                  ),
+              ),
+            ] else ...[
+              ElevatedButton.icon(
+                onPressed: _cancelTimer,
+                icon: const Icon(Icons.stop),
+                label: const Text('Cancel Timer', style: TextStyle(fontWeight: FontWeight.bold)),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.redAccent,
+                  foregroundColor: Colors.white,
+                  padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
                 ),
-              ],
-            ),
+              ),
+            ],
           ],
         ),
       ),
     );
   }
+
+  Widget _durationButton(int seconds, String label) {
+    final isSelected = _selectedDuration == seconds;
+    return ChoiceChip(
+      label: Text(label),
+      selected: isSelected,
+      onSelected: (selected) {
+        if (selected) {
+          setState(() {
+            _selectedDuration = seconds;
+          });
+        }
+      },
+    );
+  }
 }
 
 // ==========================================
-// 5. SLEEP HISTORY (PLACEHOLDER)
+// 5. SLEEP HISTORY
 // ==========================================
-class SleepScreenPlaceholder extends StatelessWidget {
-  const SleepScreenPlaceholder({super.key});
+class SleepScreen extends StatefulWidget {
+  final String serverIp;
+
+  const SleepScreen({super.key, required this.serverIp});
+
+  @override
+  State<SleepScreen> createState() => _SleepScreenState();
+}
+
+class _SleepScreenState extends State<SleepScreen> {
+  List<dynamic> _sessions = [];
+  bool _isLoading = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _fetchSleepLogs();
+  }
+
+  Future<void> _fetchSleepLogs() async {
+    if (!mounted) return;
+    setState(() {
+      _isLoading = true;
+    });
+
+    try {
+      final response = await http.get(
+        Uri.parse('http://${widget.serverIp}:8888/api/sleep'),
+      ).timeout(const Duration(seconds: 5));
+
+      if (response.statusCode == 200) {
+        setState(() {
+          _sessions = json.decode(response.body);
+        });
+      }
+    } catch (e) {
+      // Fail silently
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isLoading = false;
+        });
+      }
+    }
+  }
+
+  Color _getQualityColor(String quality) {
+    final q = quality.toLowerCase();
+    if (q.contains("good")) return Colors.green;
+    if (q.contains("poor")) return Colors.redAccent;
+    return Colors.orange;
+  }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('Sleep Monitor')),
-      body: ListView(
-        padding: const EdgeInsets.all(16.0),
-        children: [
-          Card(
-            color: const Color(0xFF2C2C2C),
-            child: Padding(
-              padding: const EdgeInsets.all(16.0),
-              child: Column(
-                children: [
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: [
-                      const Text(
-                        'Last Night\'s Sleep',
-                        style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
-                      ),
-                      Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                        decoration: BoxDecoration(
-                          color: Colors.green.shade800,
-                          borderRadius: BorderRadius.circular(12),
-                        ),
-                        child: const Text('GOOD', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold)),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 16),
-                  const Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceAround,
-                    children: [
-                      _SleepStat(value: '7.8h', label: 'Duration'),
-                      _SleepStat(value: '4', label: 'Tosses'),
-                      _SleepStat(value: '120', label: 'Avg LDR'),
-                    ],
-                  ),
-                ],
-              ),
-            ),
+      appBar: AppBar(
+        title: const Text('Sleep Metrics History'),
+        centerTitle: true,
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.refresh),
+            onPressed: _fetchSleepLogs,
           ),
-          const SizedBox(height: 16),
-          const Text('Recent Sessions', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
-          const SizedBox(height: 8),
-          _buildSleepSessionTile('July 9', 'Sleep', '8.2 hours', 'Good', Colors.green),
-          _buildSleepSessionTile('July 8', 'Nap', '1.5 hours', 'Fair', Colors.orange),
-          _buildSleepSessionTile('July 7', 'Sleep', '6.5 hours', 'Poor (Noisy)', Colors.redAccent),
         ],
       ),
+      body: _isLoading
+          ? const Center(child: CircularProgressIndicator())
+          : _sessions.isEmpty
+              ? Center(
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Icon(Icons.bedtime_off, size: 64, color: Colors.grey.shade600),
+                      const SizedBox(height: 12),
+                      const Text('No sleep session logs recorded yet.', style: TextStyle(color: Colors.grey)),
+                    ],
+                  ),
+                )
+              : ListView.builder(
+                  padding: const EdgeInsets.all(16),
+                  itemCount: _sessions.length,
+                  itemBuilder: (context, index) {
+                    final session = _sessions[_sessions.length - 1 - index];
+                    final quality = session['quality'] ?? "Fair";
+                    final duration = session['duration_hours'] ?? 0.0;
+                    final type = session['type'] ?? "sleep";
+
+                    return Card(
+                      margin: const EdgeInsets.only(bottom: 16),
+                      child: Padding(
+                        padding: const EdgeInsets.all(16.0),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Row(
+                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                              children: [
+                                Row(
+                                  children: [
+                                    Icon(
+                                      type.toString().toLowerCase().contains("nap")
+                                          ? Icons.wb_sunny
+                                          : Icons.nightlight_round,
+                                      color: const Color(0xFFFEE000),
+                                    ),
+                                    const SizedBox(width: 8),
+                                    Text(
+                                      '${type.toString().toUpperCase()} SESSION',
+                                      style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15),
+                                    ),
+                                  ],
+                                ),
+                                Container(
+                                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                                  decoration: BoxDecoration(
+                                    color: _getQualityColor(quality).withAlpha(38),
+                                    borderRadius: BorderRadius.circular(12),
+                                    border: Border.all(color: _getQualityColor(quality), width: 1),
+                                  ),
+                                  child: Text(
+                                    quality.toString().toUpperCase(),
+                                    style: TextStyle(
+                                      fontSize: 11,
+                                      fontWeight: FontWeight.bold,
+                                      color: _getQualityColor(quality),
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ),
+                            const Divider(height: 24, color: Colors.white12),
+                            Row(
+                              mainAxisAlignment: MainAxisAlignment.spaceAround,
+                              children: [
+                                _statBox('${duration}h', 'Duration'),
+                                _statBox('${session['movement_count'] ?? 0}', 'Tosses'),
+                                _statBox('${session['average_ldr'] ?? 0}', 'Avg Light'),
+                              ],
+                            ),
+                            const SizedBox(height: 16),
+                            Row(
+                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                              children: [
+                                Text(
+                                  'Started: ${session['start_time']}',
+                                  style: const TextStyle(fontSize: 11, color: Colors.grey),
+                                ),
+                                Text(
+                                  'Ended: ${session['end_time']}',
+                                  style: const TextStyle(fontSize: 11, color: Colors.grey),
+                                ),
+                              ],
+                            ),
+                            const SizedBox(height: 8),
+                            Text(
+                              'Noise profile: Avg ${session['average_noise'] ?? 0} RMS | Max ${session['max_noise'] ?? 0} RMS | Spikes: ${session['noise_events'] ?? 0}',
+                              style: const TextStyle(fontSize: 11, color: Colors.grey),
+                            ),
+                          ],
+                        ),
+                      ),
+                    );
+                  },
+                ),
     );
   }
 
-  Widget _buildSleepSessionTile(String date, String type, String duration, String quality, Color qualityColor) {
-    return Card(
-      margin: const EdgeInsets.only(bottom: 8),
-      child: ListTile(
-        leading: CircleAvatar(
-          backgroundColor: Colors.white10,
-          child: Icon(type == 'Sleep' ? Icons.nightlight_round : Icons.wb_sunny, color: const Color(0xFFFEE000)),
-        ),
-        title: Text('$type Session • $date'),
-        subtitle: Text('Duration: $duration'),
-        trailing: Text(
-          quality,
-          style: TextStyle(fontWeight: FontWeight.bold, color: qualityColor),
-        ),
-      ),
-    );
-  }
-}
-
-class _SleepStat extends StatelessWidget {
-  final String value;
-  final String label;
-
-  const _SleepStat({required this.value, required this.label});
-
-  @override
-  Widget build(BuildContext context) {
+  Widget _statBox(String value, String label) {
     return Column(
       children: [
         Text(
           value,
-          style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold, color: Color(0xFFFEE000)),
+          style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: Color(0xFFFEE000)),
         ),
         const SizedBox(height: 4),
         Text(
           label,
-          style: const TextStyle(fontSize: 12, color: Colors.grey),
+          style: const TextStyle(fontSize: 11, color: Colors.grey),
         ),
       ],
     );
