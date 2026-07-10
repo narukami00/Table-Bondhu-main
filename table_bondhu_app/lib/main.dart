@@ -520,6 +520,7 @@ class _ChatScreenState extends State<ChatScreen> {
   final _audioRecorder = AudioRecorder();
   bool _isRecording = false;
   String _recordingStatus = "";
+  DateTime _recordingStartTime = DateTime.now();
 
   @override
   void initState() {
@@ -599,6 +600,8 @@ class _ChatScreenState extends State<ChatScreen> {
           await prevFile.delete();
         }
 
+        _recordingStartTime = DateTime.now();
+
         await _audioRecorder.start(
           const RecordConfig(
             encoder: AudioEncoder.wav,
@@ -630,6 +633,29 @@ class _ChatScreenState extends State<ChatScreen> {
 
   void _stopRecordingAndSend() async {
     if (!_isRecording) return;
+    
+    final holdDuration = DateTime.now().difference(_recordingStartTime);
+    if (holdDuration.inMilliseconds < 800) {
+      // Discard tap/short hold
+      setState(() {
+        _isRecording = false;
+        _recordingStatus = "";
+      });
+      try {
+        await _audioRecorder.stop();
+      } catch (_) {}
+      
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Hold to talk, release to send (tap is too short).'),
+            duration: Duration(milliseconds: 1500),
+          ),
+        );
+      }
+      return;
+    }
+
     setState(() {
       _isRecording = false;
       _recordingStatus = "";
@@ -748,9 +774,9 @@ class _ChatScreenState extends State<ChatScreen> {
             color: Colors.black26,
             child: Row(
               children: [
-                GestureDetector(
-                  onLongPressStart: (_) => _startRecording(),
-                  onLongPressEnd: (_) => _stopRecordingAndSend(),
+                Listener(
+                  onPointerDown: (_) => _startRecording(),
+                  onPointerUp: (_) => _stopRecordingAndSend(),
                   child: Container(
                     padding: const EdgeInsets.all(10),
                     decoration: BoxDecoration(
