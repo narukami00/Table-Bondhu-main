@@ -3,6 +3,8 @@ import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
+import 'package:path_provider/path_provider.dart';
+import 'package:record/record.dart';
 
 void main() {
   runApp(const TableBondhuApp());
@@ -157,7 +159,7 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
   void _startUdpSearch() async {
     setState(() {
       _isSearchingBeacon = true;
-      _beaconStatus = "Listening for companion server beacon...";
+      _beaconStatus = "Scanning local network for UDP beacon...";
     });
     _log("Starting UDP Discovery on port 9999...");
 
@@ -282,7 +284,14 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
                 padding: const EdgeInsets.all(16.0),
                 child: Column(
                   children: [
-                    const Icon(Icons.settings_input_antenna, size: 48, color: Color(0xFFFEE000)),
+                    _isSearchingBeacon
+                        ? const PikaSearchAnimation(size: 100)
+                        : Image.asset(
+                            'assets/Pikachu/eyes_open_mouth_closed.png',
+                            width: 100,
+                            height: 100,
+                            errorBuilder: (c, e, s) => const Icon(Icons.settings_input_antenna, size: 48, color: Color(0xFFFEE000)),
+                          ),
                     const SizedBox(height: 12),
                     const Text(
                       'Connection Manager',
@@ -413,6 +422,11 @@ class _ChatScreenState extends State<ChatScreen> {
   final _messageController = TextEditingController();
   bool _isLoading = false;
 
+  // Recording API
+  final _audioRecorder = AudioRecorder();
+  bool _isRecording = false;
+  String _recordingStatus = "";
+
   @override
   void initState() {
     super.initState();
@@ -421,6 +435,13 @@ class _ChatScreenState extends State<ChatScreen> {
       isUser: false,
       timestamp: DateTime.now(),
     ));
+  }
+
+  @override
+  void dispose() {
+    _audioRecorder.dispose();
+    _messageController.dispose();
+    super.dispose();
   }
 
   void _sendMessage() async {
@@ -472,6 +493,114 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
+  // --- Voice Message Recording ---
+  void _startRecording() async {
+    try {
+      if (await _audioRecorder.hasPermission()) {
+        final tempDir = await getTemporaryDirectory();
+        final path = '${tempDir.path}/voice_chat.wav';
+
+        final prevFile = File(path);
+        if (await prevFile.exists()) {
+          await prevFile.delete();
+        }
+
+        await _audioRecorder.start(
+          const RecordConfig(
+            encoder: AudioEncoder.wav,
+            sampleRate: 16000,
+            numChannels: 1,
+          ),
+          path: path,
+        );
+
+        setState(() {
+          _isRecording = true;
+          _recordingStatus = "Listening... Release button to send.";
+        });
+      } else {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Audio Recording Permission Denied.')),
+          );
+        }
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Failed to start recording: $e')),
+        );
+      }
+    }
+  }
+
+  void _stopRecordingAndSend() async {
+    if (!_isRecording) return;
+    setState(() {
+      _isRecording = false;
+      _recordingStatus = "";
+      _isLoading = true;
+    });
+
+    try {
+      final path = await _audioRecorder.stop();
+      if (path != null) {
+        final file = File(path);
+        if (await file.exists()) {
+          final bytes = await file.readAsBytes();
+          final base64Audio = base64Encode(bytes);
+
+          setState(() {
+            _messages.add(ChatMessage(text: "[Voice Message]", isUser: true, timestamp: DateTime.now()));
+          });
+
+          final response = await http.post(
+            Uri.parse('http://${widget.serverIp}:8888/api/voice_chat'),
+            headers: {'Content-Type': 'application/json'},
+            body: json.encode({'audio': base64Audio}),
+          ).timeout(const Duration(seconds: 20));
+
+          if (response.statusCode == 200) {
+            final data = json.decode(response.body);
+            final transcribedText = data['text'] ?? "";
+            final reply = data['response'] ?? "No response received.";
+
+            setState(() {
+              if (_messages.isNotEmpty && _messages.last.text == "[Voice Message]") {
+                _messages.removeLast();
+              }
+              _messages.add(ChatMessage(
+                text: "Heard: \"$transcribedText\"",
+                isUser: true,
+                timestamp: DateTime.now(),
+              ));
+              _messages.add(ChatMessage(text: reply, isUser: false, timestamp: DateTime.now()));
+            });
+          } else {
+            _showErrorBubble("Error: Voice server returned status code ${response.statusCode}");
+          }
+        }
+      }
+    } catch (e) {
+      _showErrorBubble("Voice connection failed: $e");
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isLoading = false;
+        });
+      }
+    }
+  }
+
+  void _showErrorBubble(String errMsg) {
+    setState(() {
+      if (_messages.isNotEmpty && _messages.last.text == "[Voice Message]") {
+        _messages.removeLast();
+      }
+      _messages.add(ChatMessage(text: errMsg, isUser: false, timestamp: DateTime.now()));
+    });
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -495,19 +624,58 @@ class _ChatScreenState extends State<ChatScreen> {
           if (_isLoading)
             const Padding(
               padding: EdgeInsets.symmetric(vertical: 8.0),
-              child: Center(child: CircularProgressIndicator()),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  PikaSpeakingAnimation(size: 40),
+                  SizedBox(width: 12),
+                  Text('Pikachu is thinking...', style: TextStyle(color: Colors.grey, fontStyle: FontStyle.italic)),
+                ],
+              ),
+            ),
+          if (_isRecording)
+            Container(
+              padding: const EdgeInsets.all(12),
+              color: Colors.redAccent.withValues(alpha: 0.15),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  const Icon(Icons.fiber_manual_record, color: Colors.redAccent, size: 16),
+                  const SizedBox(width: 8),
+                  Text(
+                    _recordingStatus,
+                    style: const TextStyle(color: Colors.redAccent, fontWeight: FontWeight.bold),
+                  ),
+                ],
+              ),
             ),
           Container(
-            padding: const EdgeInsets.symmetric(horizontal: 8.0, vertical: 4.0),
+            padding: const EdgeInsets.symmetric(horizontal: 8.0, vertical: 6.0),
             color: Colors.black26,
             child: Row(
               children: [
+                GestureDetector(
+                  onLongPressStart: (_) => _startRecording(),
+                  onLongPressEnd: (_) => _stopRecordingAndSend(),
+                  child: Container(
+                    padding: const EdgeInsets.all(10),
+                    decoration: BoxDecoration(
+                      color: _isRecording ? Colors.redAccent : Colors.white10,
+                      shape: BoxShape.circle,
+                    ),
+                    child: Icon(
+                      Icons.mic,
+                      color: _isRecording ? Colors.white : const Color(0xFFFEE000),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 8),
                 Expanded(
                   child: TextField(
                     controller: _messageController,
                     onSubmitted: (_) => _sendMessage(),
                     decoration: const InputDecoration(
-                      hintText: 'Type your prompt here...',
+                      hintText: 'Type prompt or hold mic...',
                       border: InputBorder.none,
                       contentPadding: EdgeInsets.symmetric(horizontal: 12),
                     ),
@@ -531,23 +699,44 @@ class _ChatScreenState extends State<ChatScreen> {
       alignment: isUser ? Alignment.centerRight : Alignment.centerLeft,
       child: Container(
         margin: const EdgeInsets.symmetric(vertical: 6),
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-        constraints: BoxConstraints(maxWidth: MediaQuery.of(context).size.width * 0.75),
-        decoration: BoxDecoration(
-          color: isUser ? const Color(0xFFFEE000) : const Color(0xFF2C2C2C),
-          borderRadius: BorderRadius.only(
-            topLeft: const Radius.circular(12),
-            topRight: const Radius.circular(12),
-            bottomLeft: Radius.circular(isUser ? 12 : 0),
-            bottomRight: Radius.circular(isUser ? 0 : 12),
-          ),
-        ),
-        child: Text(
-          message.text,
-          style: TextStyle(
-            color: isUser ? Colors.black : Colors.white,
-            fontSize: 15,
-          ),
+        child: Row(
+          mainAxisAlignment: isUser ? MainAxisAlignment.end : MainAxisAlignment.start,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            if (!isUser) ...[
+              CircleAvatar(
+                radius: 18,
+                backgroundColor: Colors.white10,
+                child: Image.asset(
+                  'assets/Pikachu/eyes_open_mouth_closed.png',
+                  width: 32,
+                  height: 32,
+                  errorBuilder: (c, e, s) => const Icon(Icons.face, color: Color(0xFFFEE000)),
+                ),
+              ),
+              const SizedBox(width: 8),
+            ],
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+              constraints: BoxConstraints(maxWidth: MediaQuery.of(context).size.width * 0.65),
+              decoration: BoxDecoration(
+                color: isUser ? const Color(0xFFFEE000) : const Color(0xFF2C2C2C),
+                borderRadius: BorderRadius.only(
+                  topLeft: const Radius.circular(12),
+                  topRight: const Radius.circular(12),
+                  bottomLeft: Radius.circular(isUser ? 12 : 0),
+                  bottomRight: Radius.circular(isUser ? 0 : 12),
+                ),
+              ),
+              child: Text(
+                message.text,
+                style: TextStyle(
+                  color: isUser ? Colors.black : Colors.white,
+                  fontSize: 15,
+                ),
+              ),
+            ),
+          ],
         ),
       ),
     );
@@ -735,7 +924,12 @@ class _RemindersScreenState extends State<RemindersScreen> {
                   child: Column(
                     mainAxisAlignment: MainAxisAlignment.center,
                     children: [
-                      Icon(Icons.alarm_off, size: 64, color: Colors.grey.shade600),
+                      Image.asset(
+                        'assets/Pikachu/eyes_half_smile.png',
+                        width: 100,
+                        height: 100,
+                        errorBuilder: (c, e, s) => const Icon(Icons.alarm_off, size: 64, color: Colors.grey),
+                      ),
                       const SizedBox(height: 12),
                       const Text('No alarms or reminders found.', style: TextStyle(color: Colors.grey)),
                     ],
@@ -888,8 +1082,8 @@ class _TimerScreenState extends State<TimerScreen> {
               alignment: Alignment.center,
               children: [
                 SizedBox(
-                  width: 220,
-                  height: 220,
+                  width: 240,
+                  height: 240,
                   child: CircularProgressIndicator(
                     value: _isRunning && _selectedDuration > 0
                         ? _secondsLeft / _selectedDuration
@@ -902,9 +1096,18 @@ class _TimerScreenState extends State<TimerScreen> {
                 Column(
                   mainAxisSize: MainAxisSize.min,
                   children: [
+                    _isRunning
+                        ? const PikaWavingAnimation(size: 70)
+                        : Image.asset(
+                            'assets/Pikachu/eyes_open_mouth_closed.png',
+                            width: 70,
+                            height: 70,
+                            errorBuilder: (c, e, s) => const SizedBox(height: 70),
+                          ),
+                    const SizedBox(height: 6),
                     Text(
                       _isRunning ? _formatDuration(_secondsLeft) : "00:00",
-                      style: const TextStyle(fontSize: 48, fontWeight: FontWeight.bold),
+                      style: const TextStyle(fontSize: 36, fontWeight: FontWeight.bold),
                     ),
                     const SizedBox(height: 4),
                     Text(
@@ -977,7 +1180,7 @@ class _TimerScreenState extends State<TimerScreen> {
 }
 
 // ==========================================
-// 5. SLEEP HISTORY
+// 5. SLEEP LOGS SCREEN
 // ==========================================
 class SleepScreen extends StatefulWidget {
   final String serverIp;
@@ -991,11 +1194,13 @@ class SleepScreen extends StatefulWidget {
 class _SleepScreenState extends State<SleepScreen> {
   List<dynamic> _sessions = [];
   bool _isLoading = false;
+  String _scheduledTime = "Not Set";
 
   @override
   void initState() {
     super.initState();
     _fetchSleepLogs();
+    _fetchScheduledTime();
   }
 
   Future<void> _fetchSleepLogs() async {
@@ -1025,11 +1230,290 @@ class _SleepScreenState extends State<SleepScreen> {
     }
   }
 
+  Future<void> _fetchScheduledTime() async {
+    try {
+      final response = await http.get(
+        Uri.parse('http://${widget.serverIp}:8888/api/sleep/schedule'),
+      ).timeout(const Duration(seconds: 5));
+
+      if (response.statusCode == 200) {
+        final data = json.decode(response.body);
+        final timeStr = data['scheduled_time'];
+        if (timeStr != null && timeStr.toString().isNotEmpty) {
+          setState(() {
+            _scheduledTime = _formatTimeStr(timeStr.toString());
+          });
+        }
+      }
+    } catch (e) {
+      // Fail silently
+    }
+  }
+
+  String _formatTimeStr(String militaryTime) {
+    try {
+      final parts = militaryTime.split(":");
+      final h = int.parse(parts[0]);
+      final m = int.parse(parts[1]);
+      final suffix = h >= 12 ? "PM" : "AM";
+      final displayH = h > 12 ? h - 12 : (h == 0 ? 12 : h);
+      final displayM = m.toString().padLeft(2, '0');
+      return "$displayH:$displayM $suffix";
+    } catch (e) {
+      return militaryTime;
+    }
+  }
+
+  void _triggerInstantSleep(String type) async {
+    try {
+      final response = await http.post(
+        Uri.parse('http://${widget.serverIp}:8888/api/sleep/start'),
+        headers: {'Content-Type': 'application/json'},
+        body: json.encode({'type': type}),
+      ).timeout(const Duration(seconds: 5));
+
+      if (response.statusCode == 200) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Successfully started instant ${type == "sleep" ? "sleep" : "nap"}! ESP32 screen updated.')),
+          );
+        }
+      } else {
+        final errorMsg = json.decode(response.body)['error'] ?? "Unknown error";
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text(errorMsg)),
+          );
+        }
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Failed to connect to companion server.')),
+        );
+      }
+    }
+  }
+
+  void _selectBedtime() async {
+    final TimeOfDay? picked = await showTimePicker(
+      context: context,
+      initialTime: const TimeOfDay(hour: 22, minute: 0),
+    );
+
+    if (picked != null) {
+      final militaryTime = "${picked.hour.toString().padLeft(2, '0')}:${picked.minute.toString().padLeft(2, '0')}";
+      try {
+        final response = await http.post(
+          Uri.parse('http://${widget.serverIp}:8888/api/sleep/schedule'),
+          headers: {'Content-Type': 'application/json'},
+          body: json.encode({'time': militaryTime}),
+        ).timeout(const Duration(seconds: 5));
+
+        if (response.statusCode == 200) {
+          setState(() {
+            _scheduledTime = _formatTimeStr(militaryTime);
+          });
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(content: Text('Bedtime scheduled for $_scheduledTime')),
+            );
+          }
+        }
+      } catch (e) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Failed to save scheduled bedtime.')),
+          );
+        }
+      }
+    }
+  }
+
   Color _getQualityColor(String quality) {
     final q = quality.toLowerCase();
     if (q.contains("good")) return Colors.green;
     if (q.contains("poor")) return Colors.redAccent;
     return Colors.orange;
+  }
+
+  Widget _buildSleepControlPanel() {
+    return Card(
+      margin: const EdgeInsets.all(16),
+      color: const Color(0xFF1E1E1E),
+      child: Padding(
+        padding: const EdgeInsets.all(16.0),
+        child: Column(
+          children: [
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text(
+                      'Target Bedtime',
+                      style: TextStyle(color: Colors.grey, fontSize: 13),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      _scheduledTime,
+                      style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: Color(0xFFFEE000)),
+                    ),
+                  ],
+                ),
+                const PikaSleepingAnimation(size: 80),
+                ElevatedButton.icon(
+                  onPressed: _selectBedtime,
+                  icon: const Icon(Icons.access_time),
+                  label: const Text('Schedule'),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.white10,
+                    foregroundColor: Colors.white,
+                  ),
+                ),
+              ],
+            ),
+            const Divider(height: 24, color: Colors.white10),
+            Row(
+              children: [
+                Expanded(
+                  child: ElevatedButton.icon(
+                    onPressed: () => _triggerInstantSleep("sleep"),
+                    icon: const Icon(Icons.nightlight_round),
+                    label: const Text('Instant Sleep', style: TextStyle(fontWeight: FontWeight.bold)),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: const Color(0xFFFEE000),
+                      foregroundColor: Colors.black,
+                      padding: const EdgeInsets.symmetric(vertical: 12),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: ElevatedButton.icon(
+                    onPressed: () => _triggerInstantSleep("nap"),
+                    icon: const Icon(Icons.wb_sunny_outlined),
+                    label: const Text('Instant Nap', style: TextStyle(fontWeight: FontWeight.bold)),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.white12,
+                      foregroundColor: Colors.white,
+                      padding: const EdgeInsets.symmetric(vertical: 12),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildSleepLogCard(dynamic session) {
+    final quality = session['quality'] ?? "Fair";
+    final duration = session['duration_hours'] ?? 0.0;
+    final type = session['type'] ?? "sleep";
+    final tardiness = session['tardiness_minutes'] ?? 0;
+
+    return Card(
+      margin: const EdgeInsets.only(bottom: 16),
+      child: Padding(
+        padding: const EdgeInsets.all(16.0),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Row(
+                  children: [
+                    Icon(
+                      type.toString().toLowerCase().contains("nap")
+                          ? Icons.wb_sunny
+                          : Icons.nightlight_round,
+                      color: const Color(0xFFFEE000),
+                    ),
+                    const SizedBox(width: 8),
+                    Text(
+                      '${type.toString().toUpperCase()} SESSION',
+                      style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15),
+                    ),
+                  ],
+                ),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                  decoration: BoxDecoration(
+                    color: _getQualityColor(quality).withValues(alpha: 0.15),
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(color: _getQualityColor(quality), width: 1),
+                  ),
+                  child: Text(
+                    quality.toString().toUpperCase(),
+                    style: TextStyle(
+                      fontSize: 11,
+                      fontWeight: FontWeight.bold,
+                      color: _getQualityColor(quality),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            const Divider(height: 24, color: Colors.white12),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceAround,
+              children: [
+                _statBox('${duration}h', 'Duration'),
+                _statBox('${session['movement_count'] ?? 0}', 'Tosses'),
+                _statBox('${session['average_ldr'] ?? 0}', 'Avg Light'),
+              ],
+            ),
+            const SizedBox(height: 16),
+            if (tardiness > 0) ...[
+              Container(
+                margin: const EdgeInsets.only(bottom: 12),
+                padding: const EdgeInsets.all(8),
+                decoration: BoxDecoration(
+                  color: Colors.redAccent.withValues(alpha: 0.1),
+                  borderRadius: BorderRadius.circular(6),
+                  border: Border.all(color: Colors.redAccent.withValues(alpha: 0.3)),
+                ),
+                child: Row(
+                  children: [
+                    const Icon(Icons.warning_amber_rounded, color: Colors.redAccent, size: 18),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        'Went to bed $tardiness minutes past target bedtime!',
+                        style: const TextStyle(color: Colors.redAccent, fontSize: 12, fontWeight: FontWeight.w500),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Text(
+                  'Started: ${session['start_time']}',
+                  style: const TextStyle(fontSize: 11, color: Colors.grey),
+                ),
+                Text(
+                  'Ended: ${session['end_time']}',
+                  style: const TextStyle(fontSize: 11, color: Colors.grey),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            Text(
+              'Noise profile: Avg ${session['average_noise'] ?? 0} RMS | Max ${session['max_noise'] ?? 0} RMS | Spikes: ${session['noise_events'] ?? 0}',
+              style: const TextStyle(fontSize: 11, color: Colors.grey),
+            ),
+          ],
+        ),
+      ),
+    );
   }
 
   @override
@@ -1041,109 +1525,41 @@ class _SleepScreenState extends State<SleepScreen> {
         actions: [
           IconButton(
             icon: const Icon(Icons.refresh),
-            onPressed: _fetchSleepLogs,
+            onPressed: () {
+              _fetchSleepLogs();
+              _fetchScheduledTime();
+            },
           ),
         ],
       ),
       body: _isLoading
           ? const Center(child: CircularProgressIndicator())
-          : _sessions.isEmpty
-              ? Center(
-                  child: Column(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      Icon(Icons.bedtime_off, size: 64, color: Colors.grey.shade600),
-                      const SizedBox(height: 12),
-                      const Text('No sleep session logs recorded yet.', style: TextStyle(color: Colors.grey)),
-                    ],
-                  ),
-                )
-              : ListView.builder(
-                  padding: const EdgeInsets.all(16),
-                  itemCount: _sessions.length,
-                  itemBuilder: (context, index) {
-                    final session = _sessions[_sessions.length - 1 - index];
-                    final quality = session['quality'] ?? "Fair";
-                    final duration = session['duration_hours'] ?? 0.0;
-                    final type = session['type'] ?? "sleep";
-
-                    return Card(
-                      margin: const EdgeInsets.only(bottom: 16),
-                      child: Padding(
-                        padding: const EdgeInsets.all(16.0),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Row(
-                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                              children: [
-                                Row(
-                                  children: [
-                                    Icon(
-                                      type.toString().toLowerCase().contains("nap")
-                                          ? Icons.wb_sunny
-                                          : Icons.nightlight_round,
-                                      color: const Color(0xFFFEE000),
-                                    ),
-                                    const SizedBox(width: 8),
-                                    Text(
-                                      '${type.toString().toUpperCase()} SESSION',
-                                      style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15),
-                                    ),
-                                  ],
-                                ),
-                                Container(
-                                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                                  decoration: BoxDecoration(
-                                    color: _getQualityColor(quality).withAlpha(38),
-                                    borderRadius: BorderRadius.circular(12),
-                                    border: Border.all(color: _getQualityColor(quality), width: 1),
-                                  ),
-                                  child: Text(
-                                    quality.toString().toUpperCase(),
-                                    style: TextStyle(
-                                      fontSize: 11,
-                                      fontWeight: FontWeight.bold,
-                                      color: _getQualityColor(quality),
-                                    ),
-                                  ),
-                                ),
-                              ],
-                            ),
-                            const Divider(height: 24, color: Colors.white12),
-                            Row(
-                              mainAxisAlignment: MainAxisAlignment.spaceAround,
-                              children: [
-                                _statBox('${duration}h', 'Duration'),
-                                _statBox('${session['movement_count'] ?? 0}', 'Tosses'),
-                                _statBox('${session['average_ldr'] ?? 0}', 'Avg Light'),
-                              ],
-                            ),
-                            const SizedBox(height: 16),
-                            Row(
-                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                              children: [
-                                Text(
-                                  'Started: ${session['start_time']}',
-                                  style: const TextStyle(fontSize: 11, color: Colors.grey),
-                                ),
-                                Text(
-                                  'Ended: ${session['end_time']}',
-                                  style: const TextStyle(fontSize: 11, color: Colors.grey),
-                                ),
-                              ],
-                            ),
-                            const SizedBox(height: 8),
-                            Text(
-                              'Noise profile: Avg ${session['average_noise'] ?? 0} RMS | Max ${session['max_noise'] ?? 0} RMS | Spikes: ${session['noise_events'] ?? 0}',
-                              style: const TextStyle(fontSize: 11, color: Colors.grey),
-                            ),
-                          ],
+          : Column(
+              children: [
+                _buildSleepControlPanel(),
+                Expanded(
+                  child: _sessions.isEmpty
+                      ? Center(
+                          child: Column(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              Icon(Icons.bedtime_off, size: 64, color: Colors.grey.shade600),
+                              const SizedBox(height: 12),
+                              const Text('No sleep logs recorded yet.', style: TextStyle(color: Colors.grey)),
+                            ],
+                          ),
+                        )
+                      : ListView.builder(
+                          padding: const EdgeInsets.symmetric(horizontal: 16),
+                          itemCount: _sessions.length,
+                          itemBuilder: (context, index) {
+                            final session = _sessions[_sessions.length - 1 - index];
+                            return _buildSleepLogCard(session);
+                          },
                         ),
-                      ),
-                    );
-                  },
                 ),
+              ],
+            ),
     );
   }
 
@@ -1160,6 +1576,199 @@ class _SleepScreenState extends State<SleepScreen> {
           style: const TextStyle(fontSize: 11, color: Colors.grey),
         ),
       ],
+    );
+  }
+}
+
+// --------------------------------------------------
+// PIKACHU ANIMATED WIDGETS
+// --------------------------------------------------
+
+class PikaSearchAnimation extends StatefulWidget {
+  final double size;
+  const PikaSearchAnimation({super.key, this.size = 120});
+
+  @override
+  State<PikaSearchAnimation> createState() => _PikaSearchAnimationState();
+}
+
+class _PikaSearchAnimationState extends State<PikaSearchAnimation> {
+  int _frame = 0;
+  Timer? _timer;
+  final List<String> _frames = [
+    'assets/Pikachu/peek_1.png',
+    'assets/Pikachu/peek_2.png',
+    'assets/Pikachu/peek_3.png',
+    'assets/Pikachu/peek_4.png',
+  ];
+
+  @override
+  void initState() {
+    super.initState();
+    _timer = Timer.periodic(const Duration(milliseconds: 400), (timer) {
+      if (mounted) {
+        setState(() {
+          _frame = (_frame + 1) % _frames.length;
+        });
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    _timer?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Image.asset(
+      _frames[_frame],
+      width: widget.size,
+      height: widget.size,
+      fit: BoxFit.contain,
+      errorBuilder: (context, error, stackTrace) => const Icon(Icons.search, size: 48, color: Color(0xFFFEE000)),
+    );
+  }
+}
+
+class PikaSpeakingAnimation extends StatefulWidget {
+  final double size;
+  const PikaSpeakingAnimation({super.key, this.size = 100});
+
+  @override
+  State<PikaSpeakingAnimation> createState() => _PikaSpeakingAnimationState();
+}
+
+class _PikaSpeakingAnimationState extends State<PikaSpeakingAnimation> {
+  int _frame = 0;
+  Timer? _timer;
+  final List<String> _frames = [
+    'assets/Pikachu/eyes_open_mouth_closed.png',
+    'assets/Pikachu/eyes_open_mouth_open_20.png',
+    'assets/Pikachu/eyes_open_mouth_open_60.png',
+    'assets/Pikachu/eyes_open_mouth_open_100.png',
+  ];
+
+  @override
+  void initState() {
+    super.initState();
+    _timer = Timer.periodic(const Duration(milliseconds: 150), (timer) {
+      if (mounted) {
+        setState(() {
+          _frame = (_frame + 1) % _frames.length;
+        });
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    _timer?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Image.asset(
+      _frames[_frame],
+      width: widget.size,
+      height: widget.size,
+      fit: BoxFit.contain,
+      errorBuilder: (context, error, stackTrace) => const Icon(Icons.record_voice_over, size: 48, color: Color(0xFFFEE000)),
+    );
+  }
+}
+
+class PikaSleepingAnimation extends StatefulWidget {
+  final double size;
+  const PikaSleepingAnimation({super.key, this.size = 110});
+
+  @override
+  State<PikaSleepingAnimation> createState() => _PikaSleepingAnimationState();
+}
+
+class _PikaSleepingAnimationState extends State<PikaSleepingAnimation> {
+  int _frame = 0;
+  Timer? _timer;
+  final List<String> _frames = [
+    'assets/Pikachu/sleep/sleep_1.png',
+    'assets/Pikachu/sleep/sleep_2.png',
+  ];
+
+  @override
+  void initState() {
+    super.initState();
+    _timer = Timer.periodic(const Duration(seconds: 1), (timer) {
+      if (mounted) {
+        setState(() {
+          _frame = (_frame + 1) % _frames.length;
+        });
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    _timer?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Image.asset(
+      _frames[_frame],
+      width: widget.size,
+      height: widget.size,
+      fit: BoxFit.contain,
+      errorBuilder: (context, error, stackTrace) => const Icon(Icons.nightlight_round, size: 48, color: Color(0xFFFEE000)),
+    );
+  }
+}
+
+class PikaWavingAnimation extends StatefulWidget {
+  final double size;
+  const PikaWavingAnimation({super.key, this.size = 120});
+
+  @override
+  State<PikaWavingAnimation> createState() => _PikaWavingAnimationState();
+}
+
+class _PikaWavingAnimationState extends State<PikaWavingAnimation> {
+  int _frame = 0;
+  Timer? _timer;
+  final List<String> _frames = [
+    'assets/Pikachu/wave_1.png',
+    'assets/Pikachu/wave_2.png',
+    'assets/Pikachu/wave_3.png',
+  ];
+
+  @override
+  void initState() {
+    super.initState();
+    _timer = Timer.periodic(const Duration(milliseconds: 300), (timer) {
+      if (mounted) {
+        setState(() {
+          _frame = (_frame + 1) % _frames.length;
+        });
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    _timer?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Image.asset(
+      _frames[_frame],
+      width: widget.size,
+      height: widget.size,
+      fit: BoxFit.contain,
+      errorBuilder: (context, error, stackTrace) => const Icon(Icons.hourglass_empty, size: 48, color: Color(0xFFFEE000)),
     );
   }
 }

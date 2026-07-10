@@ -1681,14 +1681,13 @@ class CompanionRestHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == '/api/reminders':
             self._set_headers(200)
-            reminders = []
-            if os.path.exists("reminders.json"):
-                try:
-                    with open("reminders.json", "r", encoding="utf-8") as f:
-                        reminders = json.load(f)
-                except Exception:
-                    pass
-            self.wfile.write(json.dumps(reminders).encode('utf-8'))
+            active_list = get_active_reminders()
+            self.wfile.write(json.dumps(active_list).encode('utf-8'))
+
+        elif self.path == '/api/sleep/schedule':
+            self._set_headers(200)
+            global scheduled_sleep_time
+            self.wfile.write(json.dumps({"scheduled_time": scheduled_sleep_time or ""}).encode('utf-8'))
 
         elif self.path == '/api/sleep':
             self._set_headers(200)
