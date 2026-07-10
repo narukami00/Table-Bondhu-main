@@ -31,28 +31,28 @@
     "task": "study",
     "trigger_time": "2026-07-01T21:00:00",
     "display_time": "9:00 PM",
-    "fired": false,
+    "fired": true,
     "created": "2026-07-01T14:57:14.085771"
   },
   {
     "task": "Alarm",
     "trigger_time": "2026-07-01T21:00:00",
     "display_time": "9:00 PM",
-    "fired": false,
+    "fired": true,
     "created": "2026-07-01T15:05:05.499225"
   },
   {
     "task": "Alarm",
     "trigger_time": "2026-07-01T22:00:00",
     "display_time": "10:00 PM",
-    "fired": false,
+    "fired": true,
     "created": "2026-07-01T15:06:48.374321"
   },
   {
     "task": "eat",
     "trigger_time": "2026-07-01T20:00:00",
     "display_time": "8:00 PM",
-    "fired": false,
+    "fired": true,
     "created": "2026-07-01T15:07:39.965688"
   },
   {

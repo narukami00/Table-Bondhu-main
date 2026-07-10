@@ -1,59 +1,146 @@
-# Table-Bondhu Agentic Companion Guide 🤖🎒
+# Companion User Guide
 
-This guide explains how to run and test the new hands-free, wake-word-activated voice assistant backend (`agentic_companion.py`) with support for agentic reminders, alarms, and laptop speaker playback.
+## What is Table-Bondhu?
 
----
+Table-Bondhu is a smart desk companion — a small ESP32-powered device with a color display that sits on your desk and responds to your voice. It's like having a tiny AI assistant that you can talk to by pressing a button.
 
-## 1. Features Implemented
+## Getting Started
 
-*   **Hands-Free Wake Word Recognition:** Say *"wake up"* to activate Table-Bondhu. No hardware buttons or manual triggers are required.
-*   **Dynamic VAD Silence Detection:** The server continuously measures audio energy (RMS) and automatically calibrates to your room's baseline noise floor. It stops recording and starts transcribing only when you finish speaking (silent for ~1.5 seconds).
-*   **Agentic Reminders & Alarms:** Equipped the local LLM (`google/gemma-4-e4b` via LM Studio) with capabilities to:
-    *   **Add Reminders/Alarms:** *"Set a reminder to study IoT at 3:00 PM"* (auto-converts to 24-hour format).
-    *   **List Reminders:** *"What are my reminders?"*
-    *   **Clear Reminders:** *"Delete all reminders."*
-*   **Laptop Audio Integration:** Plays alarm buzzing sounds directly through your laptop speakers using Windows native `winsound` (no extra Python package installation required!).
-*   **Alarm Dismissal:** Say *"stop"*, *"dismiss"*, or *"cancel"* to turn off the alarm buzzing.
-*   **Visual Layouts on ESP32:** Updated the `live_rec.ino` screen renderer to support custom states:
-    *   **`Ready!` (Idle)** screen.
-    *   **`Listening...`** screen with guidance.
-    *   **`Thinking...`** screen while the local LLM processes.
-    *   **`Reminders:`** screen showing a checklist of all active tasks.
-    *   **`ALARM!`** screen flashing red when an alarm is triggered.
+1. Plug in your ESP32 and ensure the Python server is running
+2. Wait for the clock display to show "SYSTEM READY"
+3. Press D14 button and speak!
 
----
+## Voice Commands
 
-## 2. Quick Start Setup
+### Basic Interaction
+1. **Press and hold** the tactile button (D14)
+2. **Speak** your command while holding
+3. **Release** the button — companion responds
 
-### Step 1: Flash the ESP32
-1. Open the updated [live_rec.ino](file:///F:/__KUET%20CSE22/Assignments/IOT/Table-Bondhu-main/live_rec.ino) in the Arduino IDE.
-2. Verify that your WiFi configurations match in your config files.
-3. Flash the code to your ESP32.
+### What You Can Say
 
-### Step 2: Start LM Studio
-1. Open **LM Studio**.
-2. Load your `google/gemma-4-e4b` model.
-3. Start the **Local Server** on port `1234` (ensure the Endpoint matches `http://127.0.0.1:1234/v1/chat/completions`).
+#### Greetings
+- "Hi", "Hello", "Hey", "Yo"
 
-### Step 3: Run the Python Server
-Launch the new agentic companion server:
-```bash
-python agentic_companion.py
+#### Ask Questions
+- "What time is it?", "How are you?", "Tell me a joke"
+- Any question with what, how, why, can you, is, do, where, when, who
+
+#### Set Reminders
+- "Remind me at 3pm"
+- "Set alarm for 8:30 AM"
+- "Alarm in 5 minutes"
+- "Remind me to buy milk in 2 hours"
+
+#### Manage Reminders
+- "What are my reminders?" — Lists all active
+- "Delete the first reminder" — Removes specific one
+- "Clear all reminders" — Removes everything
+
+#### Start Timers
+- "Timer for 25 minutes"
+- "Countdown for 10 minutes"
+- "Focus timer for 1 hour"
+
+#### Control Timers
+- Say "pause", "resume", "cancel" during timer
+- Short press button to pause/resume
+- Long press (1s+) to cancel
+- BOOT button to cancel
+
+#### Dismiss Alarms
+- Say "stop", "dismiss", "cancel", "shut up"
+- Or press any button
+
+## Display Modes
+
+### Clock Mode (Default)
+Shows current time, date, weather icon, and connection status.
+
+### Listening Mode
+Avatar shows smile with "LISTENING..." indicator.
+
+### Thinking Mode
+"Thinking..." with animated dots while processing.
+
+### Speaking Mode
+Response text in speech bubble with animated avatar.
+
+### Reminder List
+Paginated full-screen list of active reminders.
+
+### Timer Display
+Large countdown with MM:SS or HH:MM:SS format.
+
+### Alarm Mode
+Flashing red background with alarm name. Buzzer sounds. Auto-dismisses after 30s.
+
+### Sleeping Mode
+Black screen with "Sleeping" text. Activates after 30 seconds of no PIR motion. Wakes on motion detection.
+
+## Button Controls
+
+| Button | Action |
+|--------|--------|
+| D14 (short press) | Start recording (clock/idle states) |
+| D14 (short press) | Pause/Resume timer |
+| D14 (long press, 1s+) | Cancel timer |
+| D14 (short press) | Dismiss alarm |
+| BOOT/D0 | Paginate text / Cancel timer |
+
+## PIR Motion Sensor
+
+The companion includes a PIR sensor (HC-SR501) on GPIO 27 for motion detection:
+
+- **30 seconds of no motion** → Display enters sleeping mode
+- **Motion detected** → Wakes back to clock mode
+- **Purpose**: Calibrate PIR sensitivity knobs to get the right detection range
+
+### PIR Sensor Knobs
+
+- **Sensitivity** (left/top): Turn counter-clockwise to reduce false triggers
+- **Time delay** (right/bottom): Turn to minimum (~3 seconds)
+
+### PIR Positioning
+
+- Mount upright with dome facing horizontally
+- Avoid pointing at: air vents, windows, heaters, monitors
+- Best detection: lateral movement across field of view
+
+## Adaptive Display
+
+Auto-adjusts color theme based on ambient light:
+- **Night** (dark): Black/yellow
+- **Dusk** (dim): Navy/light blue
+- **Autumn** (moderate): Orange/dark red
+- **Bright** (well-lit): White/dark blue
+
+## Avatar Themes
+
+Two visual themes (compile-time selection):
+- **Pikachu**: Yellow Pikachu with various expressions
+- **Girl**: Anime-style girl avatar
+
+Change in `gemini_LLM_btn.ino`:
+```cpp
+#define ACTIVE_THEME THEME_PIKACHU    // or
+#define ACTIVE_THEME THEME_GIRL
 ```
-Upon startup, the server will load the Whisper model and wait for the ESP32 to connect.
 
----
+## Audio
 
-## 3. Testing Your Desk Companion
+- All responses use Pikachu voice effect (+40% pitch/speed)
+- Laptop speakers for TTS output
+- ESP32 buzzer for alarms and timer alerts
+- Short two-tone beep on wake-up
 
-1. **Boot the ESP32:** The screen should connect to your Wi-Fi and say **"Ready! Say 'Wake Up' to talk"**.
-2. **Wake Word:** Say *"Wake Up"*. 
-   * The laptop will emit a double-beep sound.
-   * The ESP32 screen will transition to **"Listening..."**.
-3. **Ask a Question:** Ask *"What is the capital of Bangladesh?"* or set a reminder:
-   * *"Set a reminder to study IoT at 15:30"*
-   * *"What are my reminders?"*
-   * *"Clear all reminders"*
-4. **Silence Trigger:** When you stop speaking for 1.8 seconds, the ESP32 screen changes to **"Thinking..."**.
-5. **Alarm Firing:** When the system clock matches your scheduled reminder time, the laptop speakers will play an alarm sound and the ESP32 screen will flash a red **"ALARM!"** page.
-6. **Dismiss Alarm:** Say *"stop"* or *"dismiss"* to quiet the alarm and return the companion to the Idle state.
+## Troubleshooting
+
+### "DISCONNECTED" on display
+Check server is running and WiFi credentials are correct.
+
+### No audio response
+Ensure LM Studio is running with a model loaded.
+
+### PIR keeps triggering / not triggering
+Adjust sensitivity and time delay potentiometers on the PIR board.

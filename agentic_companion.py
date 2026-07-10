@@ -42,6 +42,7 @@ if not os.path.exists(RECORDINGS_DIR):
 
 # State variables
 active_conn = None
+active_handler = None
 active_alarm_active = False
 active_alarm_name = ""
 alarm_fired_at = None
@@ -987,8 +988,9 @@ class VoiceAgentHandler:
         return (before, cmd, after)
 
     def run(self):
-        global active_conn
+        global active_conn, active_handler
         active_conn = self.conn
+        active_handler = self
         
         self.calibrate()
         # Start keyword detection thread
@@ -1226,6 +1228,8 @@ class VoiceAgentHandler:
         print(f"[-] Client {self.addr} disconnected")
         if active_conn == self.conn:
             active_conn = None
+        if active_handler == self:
+            active_handler = None
         self.end_sleep_session()
             
     def end_sleep_session(self):
@@ -1588,6 +1592,169 @@ def udp_discovery_beacon():
             pass
         time.sleep(2)
 
+from http.server import HTTPServer, BaseHTTPRequestHandler
+import json
+
+class CompanionRestHandler(BaseHTTPRequestHandler):
+    def log_message(self, format, *args):
+        # Suppress logging every GET/POST request to keep stdout clean
+        return
+
+    def _set_headers(self, status=200):
+        self.send_response(status)
+        self.send_header('Content-Type', 'application/json')
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+        self.send_header('Access-Control-Allow-Headers', 'Content-Type')
+        self.end_headers()
+
+    def do_OPTIONS(self):
+        self._set_headers(200)
+
+    def do_GET(self):
+        if self.path == '/api/reminders':
+            self._set_headers(200)
+            reminders = []
+            if os.path.exists("reminders.json"):
+                try:
+                    with open("reminders.json", "r", encoding="utf-8") as f:
+                        reminders = json.load(f)
+                except Exception:
+                    pass
+            self.wfile.write(json.dumps(reminders).encode('utf-8'))
+
+        elif self.path == '/api/sleep':
+            self._set_headers(200)
+            sessions = []
+            if os.path.exists("sleep_sessions.json"):
+                try:
+                    with open("sleep_sessions.json", "r", encoding="utf-8") as f:
+                        sessions = json.load(f)
+                except Exception:
+                    pass
+            self.wfile.write(json.dumps(sessions).encode('utf-8'))
+        else:
+            self._set_headers(404)
+            self.wfile.write(json.dumps({"error": "Not Found"}).encode('utf-8'))
+
+    def do_POST(self):
+        global active_conn, active_handler, chat_session
+        content_length = int(self.headers['Content-Length'])
+        post_data = self.rfile.read(content_length)
+        
+        try:
+            data = json.loads(post_data.decode('utf-8'))
+        except Exception:
+            data = {}
+
+        if self.path == '/api/chat':
+            message = data.get("message", "")
+            if not message:
+                self._set_headers(400)
+                self.wfile.write(json.dumps({"error": "Empty message"}).encode('utf-8'))
+                return
+
+            print(f"[REST Chat] Message from app: '{message}'")
+            
+            if active_handler:
+                try:
+                    active_handler.safe_send(b"UI_STATE:THINKING\n")
+                except Exception:
+                    pass
+
+            try:
+                response = chat_session.send_message(message)
+                ai_answer = response.text.strip()
+                print(f"[REST Chat] AI Response: {ai_answer}")
+
+                # Execute tags and play audio
+                if active_handler:
+                    active_handler.handle_llm_response(ai_answer)
+                else:
+                    clean_answer = re.sub(r'\[CMD:[^\]]+\]', '', ai_answer).strip()
+                    clean_answer = re.sub(r'[\U00010000-\U0010ffff]', '', clean_answer).strip()
+                    play_speech_on_laptop(clean_answer)
+
+                clean_answer = re.sub(r'\[CMD:[^\]]+\]', '', ai_answer).strip()
+                clean_answer = re.sub(r'[\U00010000-\U0010ffff]', '', clean_answer).strip()
+
+                self._set_headers(200)
+                self.wfile.write(json.dumps({"response": clean_answer}).encode('utf-8'))
+            except Exception as e:
+                self._set_headers(500)
+                self.wfile.write(json.dumps({"error": str(e)}).encode('utf-8'))
+
+        elif self.path == '/api/reminders':
+            task = data.get("task", "")
+            time_str = data.get("time", "")  # Expecting YYYY-MM-DD HH:MM:SS
+            if not task or not time_str:
+                self._set_headers(400)
+                self.wfile.write(json.dumps({"error": "Missing task or time"}).encode('utf-8'))
+                return
+
+            try:
+                trigger_dt = datetime.datetime.strptime(time_str, "%Y-%m-%d %H:%M:%S")
+                display_str = trigger_dt.strftime("%I:%M %p")
+                add_reminder(task, trigger_dt, display_str)
+                
+                self._set_headers(200)
+                self.wfile.write(json.dumps({"status": "SUCCESS"}).encode('utf-8'))
+            except Exception as e:
+                self._set_headers(500)
+                self.wfile.write(json.dumps({"error": str(e)}).encode('utf-8'))
+
+        elif self.path == '/api/reminders/delete':
+            index = data.get("index") # 1-indexed
+            if index is None:
+                self._set_headers(400)
+                self.wfile.write(json.dumps({"error": "Missing index"}).encode('utf-8'))
+                return
+
+            deleted_task = delete_reminder_by_index(index)
+            if deleted_task:
+                self._set_headers(200)
+                self.wfile.write(json.dumps({"status": "SUCCESS", "deleted": deleted_task}).encode('utf-8'))
+            else:
+                self._set_headers(404)
+                self.wfile.write(json.dumps({"error": "Reminder not found"}).encode('utf-8'))
+
+        elif self.path == '/api/reminders/clear':
+            clear_reminders()
+            self._set_headers(200)
+            self.wfile.write(json.dumps({"status": "SUCCESS"}).encode('utf-8'))
+
+        elif self.path == '/api/timer/start':
+            duration = data.get("duration", 1500)
+            if active_handler:
+                active_handler.timer_running = True
+            if active_conn:
+                try:
+                    active_conn.sendall(f"TIMER_START:{duration}\n".encode())
+                except Exception:
+                    pass
+            self._set_headers(200)
+            self.wfile.write(json.dumps({"status": "SUCCESS"}).encode('utf-8'))
+
+        elif self.path == '/api/timer/cancel':
+            if active_handler:
+                active_handler.timer_running = False
+            if active_conn:
+                try:
+                    active_conn.sendall(b"TIMER_CANCEL\n")
+                except Exception:
+                    pass
+            self._set_headers(200)
+            self.wfile.write(json.dumps({"status": "SUCCESS"}).encode('utf-8'))
+        else:
+            self._set_headers(404)
+            self.wfile.write(json.dumps({"error": "Not Found"}).encode('utf-8'))
+
+def run_rest_server():
+    server_address = ('', 8888)
+    httpd = HTTPServer(server_address, CompanionRestHandler)
+    print("[REST API] Server running on port 8888...")
+    httpd.serve_forever()
+
 def start_server():
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -1604,6 +1771,10 @@ def start_server():
         # Start UDP Discovery Beacon Broadcaster
         udp_thread = threading.Thread(target=udp_discovery_beacon, daemon=True)
         udp_thread.start()
+
+        # Start REST API Web Server
+        rest_thread = threading.Thread(target=run_rest_server, daemon=True)
+        rest_thread.start()
         
         while True:
             conn, addr = s.accept()
