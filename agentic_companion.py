@@ -1571,7 +1571,19 @@ def udp_discovery_beacon():
     print("[Discovery] UDP beacon broadcaster running on port 9999...")
     while True:
         try:
-            udp_sock.sendto(b"TABLE_BONDHU_BEACON", ('<broadcast>', 9999))
+            broadcasts = ['255.255.255.255']
+            # Find all local interface IPs on the PC
+            for ip in socket.gethostbyname_ex(socket.gethostname())[2]:
+                if not ip.startswith("127."):
+                    parts = ip.split('.')
+                    if len(parts) == 4:
+                        parts[3] = '255'
+                        broadcasts.append('.'.join(parts))
+            for bcast in set(broadcasts):
+                try:
+                    udp_sock.sendto(b"TABLE_BONDHU_BEACON", (bcast, 9999))
+                except Exception:
+                    pass
         except Exception:
             pass
         time.sleep(2)
