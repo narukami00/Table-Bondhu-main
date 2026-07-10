@@ -44,12 +44,135 @@ class MainNavigationScreen extends StatefulWidget {
 
 class _MainNavigationScreenState extends State<MainNavigationScreen> {
   int _selectedIndex = 0;
-  String _serverIp = "192.168.0.38"; // Central Server IP state
+  String _serverIp = "10.93.229.20"; // Default server IP
+  bool _isConnected = false;
+  Timer? _pingTimer;
+  RawDatagramSocket? _udpSocket;
+  StreamSubscription? _udpSubscription;
+  bool _isUdpActive = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _initConnectionManager();
+  }
+
+  void _initConnectionManager() async {
+    // 1. Load saved IP
+    final savedIp = await _loadIp();
+    setState(() {
+      _serverIp = savedIp;
+    });
+
+    // 2. Ping once
+    await _checkConnection();
+
+    // 3. Start periodic ping checks (every 4 seconds)
+    _pingTimer = Timer.periodic(const Duration(seconds: 4), (timer) {
+      _checkConnection();
+    });
+  }
+
+  Future<void> _checkConnection() async {
+    try {
+      final response = await http.get(
+        Uri.parse('http://$_serverIp:8888/api/ping'),
+      ).timeout(const Duration(seconds: 2));
+
+      if (response.statusCode == 200) {
+        final data = json.decode(response.body);
+        if (data['status'] == 'OK') {
+          if (!_isConnected) {
+            setState(() {
+              _isConnected = true;
+            });
+            _stopUdpSearch();
+          }
+          return;
+        }
+      }
+    } catch (_) {}
+
+    // If we reach here, connection check failed
+    if (_isConnected) {
+      setState(() {
+        _isConnected = false;
+      });
+    }
+    // Start background auto-discovery if disconnected
+    _startUdpSearch();
+  }
+
+  void _startUdpSearch() async {
+    if (_isUdpActive) return;
+    _isUdpActive = true;
+
+    try {
+      _udpSocket = await RawDatagramSocket.bind(InternetAddress.anyIPv4, 9999);
+      _udpSocket!.broadcastEnabled = true;
+
+      _udpSubscription = _udpSocket!.listen((RawSocketEvent event) {
+        if (event == RawSocketEvent.read) {
+          Datagram? dg = _udpSocket!.receive();
+          if (dg != null) {
+            String message = utf8.decode(dg.data).trim();
+            if (message.contains("TABLE_BONDHU_BEACON")) {
+              final discoveredIp = dg.address.address;
+              _onIpConfigured(discoveredIp);
+              _stopUdpSearch();
+              _checkConnection(); // Ping immediately
+            }
+          }
+        }
+      });
+    } catch (_) {
+      _isUdpActive = false;
+    }
+  }
+
+  void _stopUdpSearch() {
+    _udpSubscription?.cancel();
+    _udpSocket?.close();
+    _isUdpActive = false;
+  }
+
+  Future<File> _getIpFile() async {
+    final tempDir = await getTemporaryDirectory();
+    return File('${tempDir.path}/saved_server_ip.txt');
+  }
+
+  Future<void> _saveIp(String ip) async {
+    try {
+      final file = await _getIpFile();
+      await file.writeAsString(ip);
+    } catch (_) {}
+  }
+
+  Future<String> _loadIp() async {
+    try {
+      final file = await _getIpFile();
+      if (await file.exists()) {
+        return await file.readAsString();
+      }
+    } catch (_) {}
+    return "10.93.229.20"; // Default fallback
+  }
 
   void _onIpConfigured(String newIp) {
-    setState(() {
-      _serverIp = newIp;
-    });
+    if (_serverIp != newIp) {
+      setState(() {
+        _serverIp = newIp;
+      });
+      _saveIp(newIp);
+      _checkConnection(); // Ping immediately
+    }
+  }
+
+  @override
+  void dispose() {
+    _pingTimer?.cancel();
+    _stopUdpSearch();
+    super.dispose();
   }
 
   @override
@@ -58,6 +181,7 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
       ConnectionScreen(
         initialServerIp: _serverIp,
         onIpConfigured: _onIpConfigured,
+        isConnected: _isConnected,
       ),
       ChatScreen(serverIp: _serverIp),
       RemindersScreen(serverIp: _serverIp),
@@ -70,6 +194,17 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
       bottomNavigationBar: NavigationBar(
         selectedIndex: _selectedIndex,
         onDestinationSelected: (index) {
+          if (index != 0 && !_isConnected) {
+            // Lock tabs if not connected!
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                content: Text('Cannot access features: Disconnected from Table-Bondhu Companion Server.'),
+                duration: Duration(seconds: 2),
+                backgroundColor: Colors.redAccent,
+              ),
+            );
+            return;
+          }
           setState(() {
             _selectedIndex = index;
           });
@@ -107,11 +242,13 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
 class ConnectionScreen extends StatefulWidget {
   final String initialServerIp;
   final ValueChanged<String> onIpConfigured;
+  final bool isConnected;
 
   const ConnectionScreen({
     super.key,
     required this.initialServerIp,
     required this.onIpConfigured,
+    required this.isConnected,
   });
 
   @override
@@ -124,12 +261,7 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
   late TextEditingController _serverIpController;
 
   bool _isProvisioning = false;
-  bool _isSearchingBeacon = false;
-  String _beaconStatus = "Idle";
   String _provisioningLog = "";
-
-  RawDatagramSocket? _udpSocket;
-  StreamSubscription? _udpSubscription;
 
   @override
   void initState() {
@@ -140,8 +272,15 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
   }
 
   @override
+  void didUpdateWidget(covariant ConnectionScreen oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.initialServerIp != widget.initialServerIp) {
+      _serverIpController.text = widget.initialServerIp;
+    }
+  }
+
+  @override
   void dispose() {
-    _stopUdpSearch();
     _ssidController.dispose();
     _passwordController.dispose();
     _serverIpController.dispose();
@@ -152,63 +291,6 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
     if (mounted) {
       setState(() {
         _provisioningLog += "[${DateTime.now().toString().substring(11, 19)}] $message\n";
-      });
-    }
-  }
-
-  void _startUdpSearch() async {
-    setState(() {
-      _isSearchingBeacon = true;
-      _beaconStatus = "Scanning local network for UDP beacon...";
-    });
-    _log("Starting UDP Discovery on port 9999...");
-
-    try {
-      _udpSocket = await RawDatagramSocket.bind(InternetAddress.anyIPv4, 9999);
-      _udpSocket!.broadcastEnabled = true;
-
-      _udpSubscription = _udpSocket!.listen((RawSocketEvent event) {
-        if (event == RawSocketEvent.read) {
-          Datagram? dg = _udpSocket!.receive();
-          if (dg != null) {
-            String message = utf8.decode(dg.data).trim();
-            _log("Received UDP Broadcast: '$message' from ${dg.address.address}");
-            
-            if (message.contains("TABLE_BONDHU_BEACON")) {
-              setState(() {
-                _serverIpController.text = dg.address.address;
-                _beaconStatus = "Server Found: ${dg.address.address}";
-              });
-              widget.onIpConfigured(dg.address.address);
-              _log("Auto-discovered server IP: ${dg.address.address}");
-              _stopUdpSearch();
-            }
-          }
-        }
-      });
-
-      Future.delayed(const Duration(seconds: 15), () {
-        if (_isSearchingBeacon) {
-          _log("UDP Discovery timeout (15s exceeded).");
-          _stopUdpSearch();
-          setState(() {
-            _beaconStatus = "Timeout. Server not detected.";
-          });
-        }
-      });
-
-    } catch (e) {
-      _log("UDP Binding Error: $e");
-      _stopUdpSearch();
-    }
-  }
-
-  void _stopUdpSearch() {
-    _udpSubscription?.cancel();
-    _udpSocket?.close();
-    if (mounted) {
-      setState(() {
-        _isSearchingBeacon = false;
       });
     }
   }
@@ -279,12 +361,44 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
+            // Status bar at the top
+            Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: widget.isConnected ? Colors.green.withValues(alpha: 0.15) : Colors.redAccent.withValues(alpha: 0.15),
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(
+                  color: widget.isConnected ? Colors.green : Colors.redAccent,
+                  width: 1.5,
+                ),
+              ),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Icon(
+                    widget.isConnected ? Icons.check_circle : Icons.error_outline,
+                    color: widget.isConnected ? Colors.green : Colors.redAccent,
+                  ),
+                  const SizedBox(width: 8),
+                  Text(
+                    widget.isConnected
+                        ? 'Connected to Pikachu Server (${widget.initialServerIp})'
+                        : 'Searching Server IP on Network...',
+                    style: TextStyle(
+                      fontWeight: FontWeight.bold,
+                      color: widget.isConnected ? Colors.green : Colors.redAccent,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 16),
             Card(
               child: Padding(
                 padding: const EdgeInsets.all(16.0),
                 child: Column(
                   children: [
-                    _isSearchingBeacon
+                    !widget.isConnected
                         ? const PikaSearchAnimation(size: 100)
                         : Image.asset(
                             'assets/Pikachu/eyes_open_mouth_closed.png',
@@ -299,7 +413,7 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
                     ),
                     const SizedBox(height: 8),
                     Text(
-                      _isSearchingBeacon ? 'Scanning Local Network...' : 'Configure connection to ESP32 and Python Server',
+                      !widget.isConnected ? 'Auto-scanning for local UDP beacons...' : 'You are linked. Features are unlocked!',
                       textAlign: TextAlign.center,
                       style: const TextStyle(color: Colors.grey),
                     ),
@@ -327,35 +441,15 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
               ),
             ),
             const SizedBox(height: 12),
-            Row(
-              children: [
-                Expanded(
-                  child: TextField(
-                    controller: _serverIpController,
-                    onChanged: (val) => widget.onIpConfigured(val.trim()),
-                    decoration: const InputDecoration(
-                      labelText: 'Python Server IP',
-                      border: OutlineInputBorder(),
-                      prefixIcon: Icon(Icons.computer),
-                    ),
-                  ),
-                ),
-                const SizedBox(width: 8),
-                IconButton.filledTonal(
-                  onPressed: _isSearchingBeacon ? _stopUdpSearch : _startUdpSearch,
-                  icon: Icon(_isSearchingBeacon ? Icons.stop : Icons.search),
-                  tooltip: 'Search Server IP on Network',
-                ),
-              ],
-            ),
-            if (_isSearchingBeacon || _beaconStatus != "Idle") ...[
-              const SizedBox(height: 8),
-              Text(
-                _beaconStatus,
-                style: const TextStyle(color: Color(0xFFFEE000), fontSize: 13, fontWeight: FontWeight.w500),
-                textAlign: TextAlign.center,
+            TextField(
+              controller: _serverIpController,
+              onChanged: (val) => widget.onIpConfigured(val.trim()),
+              decoration: const InputDecoration(
+                labelText: 'Python Server IP',
+                border: OutlineInputBorder(),
+                prefixIcon: Icon(Icons.computer),
               ),
-            ],
+            ),
             const SizedBox(height: 20),
             ElevatedButton(
               onPressed: _isProvisioning ? null : _sendConfiguration,

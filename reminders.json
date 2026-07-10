@@ -1,1 +1,9 @@
-[]
+[
+  {
+    "task": "study database",
+    "trigger_time": "2026-07-10T16:12:00.997646",
+    "display_time": "in 30 minutes",
+    "fired": false,
+    "created": "2026-07-10T15:42:00.998196"
+  }
+]

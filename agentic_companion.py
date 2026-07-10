@@ -1681,8 +1681,12 @@ class CompanionRestHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == '/api/reminders':
             self._set_headers(200)
-            active_list = get_active_reminders()
+            active_list = get_reminders_list()
             self.wfile.write(json.dumps(active_list).encode('utf-8'))
+
+        elif self.path == '/api/ping':
+            self._set_headers(200)
+            self.wfile.write(json.dumps({"status": "OK"}).encode('utf-8'))
 
         elif self.path == '/api/sleep/schedule':
             self._set_headers(200)
