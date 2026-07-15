@@ -170,10 +170,20 @@ If the ESP32 cannot connect to your Wi-Fi or needs reconfiguring:
 ### 4. Focus Timer Interceptor
 * If you send a timer request via the Chat tab (e.g. *"timer for 5 minutes"*), the server parses the request before hitting the LLM, triggering the ESP32 countdown display directly (`TIMER_START:duration`) instead of registering it as an alarm reminder.
 
-### 5. Sleep Monitoring & Target Bedtime Analytics
-* **Bedtime Selector:** Schedule target sleep times in the app. The server monitors LDR (light level) and PIR (movement) sensors. If it is dark and you are inactive around your target bedtime, it automatically starts sleep tracking.
-* **Tardiness Logging:** If you sleep past your scheduled time, the server logs the difference. A red alarm card appears on your log history showing: `Went to bed X minutes past target bedtime!`.
-* **Classification Rules:**
-  * `< 10 minutes`: Discarded from database logs.
-  * `10 minutes to 3 hours`: Classified as a **Nap** (marked with a sun icon).
-  * `> 3 hours`: Classified as a **Sleep** session (marked with a moon icon).
+### 5. Sleep Monitoring, Window Protection, & Diagnostics
+* **Configurable Sleep Window:** To prevent false sleep detection when you are away from home during the day (even if the room is dark), you can set a Sleep Detection Window from the app (default: 10 PM to 10 AM). The ESP32's automatic PIR sleep detection will only trigger during this window.
+* **Refined PIR Sleep State Machine:**
+  * **Sleep Timeout:** The clock now waits for **120 seconds (2 minutes)** of continuous motionlessness and dark ambient light before entering sleep mode.
+  * **Pre-Wake Standby:** Waking up requires either **3 distinct motion pulses (waves)** within a 15-second window, or **4.0 seconds of continuous motion** (sustained presence). This prevents false wakeups from minor movements like tossing and turning in bed.
+* **Manual Wake-Up & Persistence:**
+  * When the system is in sleep mode, the mobile app locks into a full-screen night overlay showing a pulsing Pikachu and a live sleep duration counter. This state persists across app restarts.
+  * Tapping the **Wake Up** button sends a manual wake command (`CMD:FORCE_WAKE`) to the ESP32 to wake up the screen, ends the sleep monitoring session, and immediately displays an inline session summary card.
+* **Sleep Diagnostics Screen:**
+  * Accessible via the **Detailed Analytics** button on the sleep tab.
+  * **Overall Sleep Score Card:** Displays average sleep duration, average tosses per session, and total logged sessions.
+  * **Sleep Duration Trend Chart:** A custom vector-drawn line graph showing duration changes over recent sessions.
+  * **Quality Ratio Pie Chart:** A custom-drawn circular chart showing the percentage of Good, Fair, and Poor sleep quality sessions.
+  * **Environmental Diagnostics:** Evaluates average ambient light (LDR) and noise levels (RMS) to diagnose your sleep hygiene quality.
+  * **Bedtime Adherence Card:** Tracks target bedtime compliance, tardiness rates, and latency.
+  * **Sleep Hygiene Insights:** Dynamically generated advice to improve your sleep environment (e.g. noise reduction, pitch darkness, or room temperature).
+

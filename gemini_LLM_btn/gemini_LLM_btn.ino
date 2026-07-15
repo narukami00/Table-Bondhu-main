@@ -87,7 +87,25 @@ unsigned long lastServerConnectAttemptMs = 0;
 
 // PIR Motion Sensor variables
 unsigned long lastPirMotionMs = 0;          // Last time PIR detected motion
-const unsigned long SLEEP_TIMEOUT_MS = 30000; // 30 seconds → sleeping mode
+const unsigned long SLEEP_TIMEOUT_MS = 120000; // 2 minutes of inactivity → sleeping mode
+
+// Sleep Window: auto-sleep only allowed between sleepWindowStartHour and sleepWindowEndHour
+// Default: 22:00 (10 PM) → 10:00 (10 AM). Configurable via SLEEP_WINDOW server command.
+int sleepWindowStartHour = 22;   // Evening hour when auto-sleep becomes active
+int sleepWindowEndHour   = 10;   // Morning hour when auto-sleep deactivates
+
+// Returns true if current local time falls inside the configured sleep window
+bool isWithinSleepWindow() {
+  struct tm timeinfo;
+  if (!getLocalTime(&timeinfo, 50)) return true; // If NTP unavailable, allow sleep
+  int h = timeinfo.tm_hour;
+  // Window wraps midnight: e.g. 22–10 means 22,23,0..9 are valid
+  if (sleepWindowStartHour > sleepWindowEndHour) {
+    return (h >= sleepWindowStartHour || h < sleepWindowEndHour);
+  }
+  // Non-wrapping window (unusual config like 2–8)
+  return (h >= sleepWindowStartHour && h < sleepWindowEndHour);
+}
 
 // Sleep / Wake pre-wake flow variables (added for robust sleep monitoring)
 unsigned long clockStateEnteredMs = 0;      // Time when STATE_CLOCK was entered continuously
@@ -95,6 +113,7 @@ unsigned long preWakeEnteredMs = 0;         // Time when STATE_SLEEPING_PREWAKE 
 unsigned long lastSleepHeartbeatMs = 0;     // Last time sleep heartbeat keep-alive command was sent
 int preWakeRisingEdges = 0;                 // Count PIR LOW->HIGH transitions during pre-wake
 unsigned long lastSleepEnteredMs = 0;       // Time when STATE_SLEEPING was entered
+
 
 // Sleep animation flare variables (added for sleep animation and clock updates)
 int sleepAnimState = 0;                     // 0 = normal sleep loop, 3 = smiling
@@ -1731,15 +1750,25 @@ void loop() {
   // --- SLEEP / WAKE STATE MACHINE LOGIC (added for sleep monitoring foundation) ---
   if (currentState == STATE_CLOCK) {
     // Sleep transition condition:
-    // 1. Continuous time in Clock State > 30s (must be in clock for 30s)
+    // 1. Continuous time in Clock State > 120s (must be in clock for 2 minutes)
     // 2. Light level is dark (LDR < 500)
     // 3. PIR is mostly motionless (motion detected in <= 3 seconds of the last 30 seconds)
-    if ((currentMs - clockStateEnteredMs > 30000) && 
+    // 4. Current time is within the configured sleep window (prevents false-sleep when user is away)
+    if ((currentMs - clockStateEnteredMs > SLEEP_TIMEOUT_MS) && 
         (cachedLdr < 500) && 
-        (motionSeconds <= 3)) {
+        (motionSeconds <= 3) &&
+        isWithinSleepWindow()) {
       setAppState(STATE_SLEEPING);
-      Serial.println("PIR: In Clock state, dark, and mostly motionless. Entering SLEEPING state.");
+      Serial.println("PIR: In Clock state, dark, motionless, and within sleep window. Entering SLEEPING state.");
+    } else if ((currentMs - clockStateEnteredMs > SLEEP_TIMEOUT_MS) && (cachedLdr < 500) && (motionSeconds <= 3) && !isWithinSleepWindow()) {
+      // Outside sleep window — conditions would trigger sleep but we are suppressing it (user is likely away)
+      static unsigned long lastWindowSkipLogMs = 0;
+      if (currentMs - lastWindowSkipLogMs > 60000) { // Log once per minute
+        lastWindowSkipLogMs = currentMs;
+        Serial.println("PIR: Sleep conditions met but outside sleep window — suppressing auto-sleep (user may be away).");
+      }
     }
+
   } 
   else if (currentState == STATE_SLEEPING) {
     // Sample LDR during sleep every 10 seconds and send to the server to monitor optimal light conditions
@@ -1775,13 +1804,8 @@ void loop() {
     // In Pre-Wake: Screen remains black, but audio/keyword streaming is enabled
     bool fullyWakeUp = false;
     
-    // Confirmation Trigger A: Motion held HIGH continuously for >= 2.0 seconds
-    if (pirState && (currentMs - preWakeEnteredMs >= 2000)) {
-      fullyWakeUp = true;
-      Serial.println("PIR: Confirmed wakeup - Motion held for 2 seconds.");
-    }
-    
-    // Confirmation Trigger B: Second distinct wave (rising edge) during the window
+    // Confirmation Trigger A: Three distinct rising edges (waves) during the 15-second window
+    // This avoids false wakes from rolling over in bed or single incidental motions
     if (risingEdge) {
       preWakeRisingEdges++;
       Serial.printf("PIR: Wave detected in pre-wake. Edge count: %d\n", preWakeRisingEdges);
@@ -1789,19 +1813,28 @@ void loop() {
       if (client.connected()) {
         client.print("PIR:MOTION\n");
       }
-      if (preWakeRisingEdges >= 2) {
+      if (preWakeRisingEdges >= 3) {
         fullyWakeUp = true;
-        Serial.println("PIR: Confirmed wakeup - Second distinct wave detected.");
+        Serial.println("PIR: Confirmed wakeup - Three distinct motion pulses detected.");
       }
     }
     
-    // Pre-wake 10-second timeout
-    if (currentMs - preWakeEnteredMs > 10000) {
+    // Confirmation Trigger B: Motion held continuously for >= 4.0 seconds
+    // (Sustained presence like sitting up or getting out of bed)
+    if (pirState && (currentMs - preWakeEnteredMs >= 4000)) {
+      fullyWakeUp = true;
+      Serial.println("PIR: Confirmed wakeup - Motion held continuously for 4 seconds.");
+    }
+    
+    // Pre-wake 15-second timeout (increased from 10s for comfort)
+    if (currentMs - preWakeEnteredMs > 15000) {
       // Pre-wake expired without confirmation trigger -> go straight back to sleep
       setAppState(STATE_SLEEPING);
+      preWakeRisingEdges = 0; // Reset edge counter
       Serial.println("PIR: Pre-wake timed out without confirmation. Returning to SLEEPING.");
     } 
     else if (fullyWakeUp) {
+      preWakeRisingEdges = 0; // Reset edge counter
       // Fully woke up to clock state (resets sleep timers)
       setAppState(STATE_CLOCK);
     }
@@ -2054,6 +2087,31 @@ void loop() {
         setAppState(STATE_SLEEPING);
         Serial.println("[CMD] Manual sleep command received from server.");
       }
+      else if (response == "CMD:FORCE_WAKE") {
+        // Manual wake-up triggered from the Android companion app
+        if (currentState == STATE_SLEEPING || currentState == STATE_SLEEPING_PREWAKE) {
+          preWakeRisingEdges = 0;
+          setAppState(STATE_CLOCK);
+          if (client.connected()) {
+            client.print("PIR:WAKE\n"); // Notify server to end sleep session
+          }
+          Serial.println("[CMD] Manual wake-up received from companion app.");
+        }
+      }
+      else if (response.startsWith("SLEEP_WINDOW:")) {
+        // Format: SLEEP_WINDOW:startHour:endHour  e.g. SLEEP_WINDOW:22:10
+        int firstColon = response.indexOf(':', 13);
+        if (firstColon != -1) {
+          int start = response.substring(13, firstColon).toInt();
+          int end   = response.substring(firstColon + 1).toInt();
+          if (start >= 0 && start <= 23 && end >= 0 && end <= 23) {
+            sleepWindowStartHour = start;
+            sleepWindowEndHour   = end;
+            Serial.printf("[Sleep Window] Updated: %02d:00 → %02d:00\n", start, end);
+          }
+        }
+      }
+
       else if (response.startsWith("UI_SLEEP_SUMMARY:")) {
         // Format: UI_SLEEP_SUMMARY:type:duration:movements:avg_noise:avg_ldr:quality
         int firstColon = response.indexOf(':', 17);

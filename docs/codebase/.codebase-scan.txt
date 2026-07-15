@@ -33,6 +33,13 @@ assets\Pikachu\peek_1.png
 assets\Pikachu\peek_2.png
 assets\Pikachu\peek_3.png
 assets\Pikachu\peek_4.png
+assets\Pikachu\sleep
+assets\Pikachu\sleep\neutral_1.png
+assets\Pikachu\sleep\neutral_2.png
+assets\Pikachu\sleep\sleep_1.png
+assets\Pikachu\sleep\sleep_2.png
+assets\Pikachu\sleep\sleep_partial.png
+assets\Pikachu\sleep\sleep_smile.png
 assets\Pikachu\wave_1.png
 assets\Pikachu\wave_2.png
 assets\Pikachu\wave_3.png
@@ -44,18 +51,155 @@ docs\codebase
 docs\codebase\.codebase-scan.txt
 docs\codebase\ARCHITECTURE.md
 docs\codebase\CONCERNS.md
+docs\codebase\CONVENTIONS.md
+docs\codebase\INTEGRATIONS.md
 docs\codebase\STACK.md
+docs\codebase\TESTING.md
 docs\README.md
 docs\STRUCTURE.md
+docs\TEACHER_QA_GUIDE.md
 gemini_LLM_btn
 gemini_LLM_btn\config.h
 gemini_LLM_btn\gemini_LLM_btn.ino
 gemini_LLM_btn\images.h
 LICENSE
+recordings_analysis
+recordings_analysis\rec_20260710_153101.wav
+recordings_analysis\rec_20260710_153119.wav
+recordings_analysis\rec_20260710_154159.wav
+recordings_analysis\sleep_sessions.log
+recordings_analysis\transcriptions.log
 reminders.json
 requirements.txt
 SETUP.md
-Table_Bondhu_Project_Guide.pdf
+table_bondhu_app
+table_bondhu_app\.dart_tool
+table_bondhu_app\.dart_tool\dartpad
+table_bondhu_app\.dart_tool\dartpad\web_plugin_registrant.dart
+table_bondhu_app\.dart_tool\flutter_build
+table_bondhu_app\.dart_tool\flutter_build\a8cca360341b22a5288426a8f8232cb3
+table_bondhu_app\.dart_tool\flutter_build\dart_plugin_registrant.dart
+table_bondhu_app\.dart_tool\package_config.json
+table_bondhu_app\.dart_tool\package_config_subset
+table_bondhu_app\.dart_tool\package_graph.json
+table_bondhu_app\.dart_tool\version
+table_bondhu_app\.flutter-plugins-dependencies
+table_bondhu_app\.gitignore
+table_bondhu_app\.idea
+table_bondhu_app\.idea\libraries
+table_bondhu_app\.idea\libraries\Dart_SDK.xml
+table_bondhu_app\.idea\libraries\KotlinJavaRuntime.xml
+table_bondhu_app\.idea\modules.xml
+table_bondhu_app\.idea\runConfigurations
+table_bondhu_app\.idea\runConfigurations\main_dart.xml
+table_bondhu_app\.idea\workspace.xml
+table_bondhu_app\.metadata
+table_bondhu_app\analysis_options.yaml
+table_bondhu_app\android
+table_bondhu_app\android\.gitignore
+table_bondhu_app\android\.gradle
+table_bondhu_app\android\.gradle\8.12
+table_bondhu_app\android\.gradle\buildOutputCleanup
+table_bondhu_app\android\.gradle\file-system.probe
+table_bondhu_app\android\.gradle\kotlin
+table_bondhu_app\android\.gradle\noVersion
+table_bondhu_app\android\.gradle\vcs-1
+table_bondhu_app\android\.kotlin
+table_bondhu_app\android\.kotlin\errors
+table_bondhu_app\android\.kotlin\sessions
+table_bondhu_app\android\app
+table_bondhu_app\android\app\build.gradle.kts
+table_bondhu_app\android\app\src
+table_bondhu_app\android\build.gradle.kts
+table_bondhu_app\android\gradle
+table_bondhu_app\android\gradle\wrapper
+table_bondhu_app\android\gradle.properties
+table_bondhu_app\android\gradlew
+table_bondhu_app\android\gradlew.bat
+table_bondhu_app\android\local.properties
+table_bondhu_app\android\settings.gradle.kts
+table_bondhu_app\android\table_bondhu_app_android.iml
+table_bondhu_app\assets
+table_bondhu_app\assets\girl
+table_bondhu_app\assets\girl\eyes_closed_mouth_open.jpg
+table_bondhu_app\assets\girl\eyes_closed_smile.jpg
+table_bondhu_app\assets\girl\eyes_half_smile.jpg
+table_bondhu_app\assets\girl\eyes_open_mouth_closed.jpg
+table_bondhu_app\assets\girl\eyes_open_mouth_open_100.jpg
+table_bondhu_app\assets\girl\eyes_open_mouth_open_20.jpg
+table_bondhu_app\assets\girl\eyes_open_mouth_open_60.jpg
+table_bondhu_app\assets\girl\eyes_open_smile.jpg
+table_bondhu_app\assets\girl\head_1.jpg
+table_bondhu_app\assets\girl\head_2.jpg
+table_bondhu_app\assets\girl\head_3.jpg
+table_bondhu_app\assets\girl\wave_1.png
+table_bondhu_app\assets\girl\wave_2.jpeg
+table_bondhu_app\assets\Pikachu
+table_bondhu_app\assets\Pikachu\eyes_closed_mouth_open.png
+table_bondhu_app\assets\Pikachu\eyes_closed_smile.png
+table_bondhu_app\assets\Pikachu\eyes_half_smile.png
+table_bondhu_app\assets\Pikachu\eyes_open_mouth_closed.png
+table_bondhu_app\assets\Pikachu\eyes_open_mouth_open_100.png
+table_bondhu_app\assets\Pikachu\eyes_open_mouth_open_20.png
+table_bondhu_app\assets\Pikachu\eyes_open_mouth_open_60.png
+table_bondhu_app\assets\Pikachu\peek_1.png
+table_bondhu_app\assets\Pikachu\peek_2.png
+table_bondhu_app\assets\Pikachu\peek_3.png
+table_bondhu_app\assets\Pikachu\peek_4.png
+table_bondhu_app\assets\Pikachu\sleep
+table_bondhu_app\assets\Pikachu\wave_1.png
+table_bondhu_app\assets\Pikachu\wave_2.png
+table_bondhu_app\assets\Pikachu\wave_3.png
+table_bondhu_app\ios
+table_bondhu_app\ios\.gitignore
+table_bondhu_app\ios\Flutter
+table_bondhu_app\ios\Flutter\AppFrameworkInfo.plist
+table_bondhu_app\ios\Flutter\Debug.xcconfig
+table_bondhu_app\ios\Flutter\ephemeral
+table_bondhu_app\ios\Flutter\flutter_export_environment.sh
+table_bondhu_app\ios\Flutter\Generated.xcconfig
+table_bondhu_app\ios\Flutter\Release.xcconfig
+table_bondhu_app\ios\Runner
+table_bondhu_app\ios\Runner\AppDelegate.swift
+table_bondhu_app\ios\Runner\Assets.xcassets
+table_bondhu_app\ios\Runner\Base.lproj
+table_bondhu_app\ios\Runner\GeneratedPluginRegistrant.h
+table_bondhu_app\ios\Runner\GeneratedPluginRegistrant.m
+table_bondhu_app\ios\Runner\Info.plist
+table_bondhu_app\ios\Runner\Runner-Bridging-Header.h
+table_bondhu_app\ios\Runner.xcodeproj
+table_bondhu_app\ios\Runner.xcodeproj\project.pbxproj
+table_bondhu_app\ios\Runner.xcodeproj\project.xcworkspace
+table_bondhu_app\ios\Runner.xcodeproj\xcshareddata
+table_bondhu_app\ios\Runner.xcworkspace
+table_bondhu_app\ios\Runner.xcworkspace\contents.xcworkspacedata
+table_bondhu_app\ios\Runner.xcworkspace\xcshareddata
+table_bondhu_app\ios\RunnerTests
+table_bondhu_app\ios\RunnerTests\RunnerTests.swift
+table_bondhu_app\lib
+table_bondhu_app\lib\main.dart
+table_bondhu_app\linux
+table_bondhu_app\linux\.gitignore
+table_bondhu_app\linux\CMakeLists.txt
+table_bondhu_app\linux\flutter
+table_bondhu_app\linux\flutter\CMakeLists.txt
+table_bondhu_app\linux\flutter\ephemeral
+table_bondhu_app\linux\flutter\generated_plugin_registrant.cc
+table_bondhu_app\linux\flutter\generated_plugin_registrant.h
+table_bondhu_app\linux\flutter\generated_plugins.cmake
+table_bondhu_app\linux\runner
+table_bondhu_app\linux\runner\CMakeLists.txt
+table_bondhu_app\linux\runner\main.cc
+table_bondhu_app\linux\runner\my_application.cc
+table_bondhu_app\linux\runner\my_application.h
+table_bondhu_app\macos
+table_bondhu_app\macos\.gitignore
+table_bondhu_app\macos\Flutter
+table_bondhu_app\macos\Flutter\ephemeral
+table_bondhu_app\macos\Flutter\Flutter-Debug.xcconfig
+table_bondhu_app\macos\Flutter\Flutter-Release.xcconfig
+table_bondhu_app\macos\Flutter\GeneratedPluginRegistrant.swift
+table_bondhu_app\macos\Runner
 
 === STACK DETECTION (manifest files) ===
 
@@ -81,6 +225,16 @@ No .env.example or .env.template found. Identify required environment variables 
 None found.
 
 === GIT RECENT COMMITS (last 20) ===
+b36a293 docs: update companion guide with Android app bridging and auto-discovery details
+d27dbd1 feat: replace long press gesture with low-level Listener pointer events for instant push-to-talk recording
+cf0fe4b fix(server): resolve do_GET NameError, add ping route, implement persistent auto-connect in Flutter
+6a15004 feat: complete companion app with mic recorder, SAPI5 fallback, tardiness logger, and Pikachu animated UI
+6d563f2 fix(server): resolve SyntaxError in alarm_scheduler globals
+ddc7c0c fix(server): resolve global scope SyntaxError in REST API do_POST
+3cda869 feat(app): implement fully connected chat, reminders, timer, and sleep metrics
+77ae9ac fix(network): enable multi-interface UDP broadcast beacon
+f90aade feat(network): implement dynamic provisioning and local server discovery
+9b1450c feat(sleep): implement sleep monitoring, manual triggers, and UI summary
 078c303 fix: bypass GTCRN speech denoiser to restore high ASR transcription accuracy
 7e312cf feat: integrate offline VITS Text-to-Speech using Piper model with Google TTS fallback
 d12e38d feat: integrate GTCRN speech denoiser to enhance voice recordings in noisy environments
@@ -91,62 +245,56 @@ d12e38d feat: integrate GTCRN speech denoiser to enhance voice recordings in noi
 db51a1a feat: offline mode resilience, dynamic status HUD and winsound truncation fix
 ec863b3 feat: overhaul focus timer UI, add manual button control & multi-unit parser
 183e127 fix: comprehensive timer countdown overhaul - fix flickering, buzzer, state interference
-adcaef1 fix: prevent premature IDLE state reset on focus timer start
-4c67933 fix: intercept button-press timer queries before sending to LLM
-d6bad4a feat: implement weather HUD and local focus timer countdown
-3869288 stable: i2s_stop/start for LDR DMA resume, server audio handling fixed
-0e44c25 fix: ___END___ missing newline (stuck at listening), restore LDR TCP send (lost during refactor)
-b45d608 fix boot crash: conditional compilation for images.h (halves binary), re-add STATE_REMINDERS
-f3de5f6 fix boot crash: move themedBuf[32KB] from static RAM to heap malloc in setup()
-880a4db fix 3 bugs: playAudioStop on state transitions, serverDuration leak in UI_LIST, TCP framing with recv_buffer
-f7cb11c fix compile errors: move bubbleLineCount globals before updateAnimations, cast volatile for memcpy/free
-bc000c8 fix 5 gaps: COLOR_ACCENT for clock/syncing, 15s LISTENING/THINKING timeout, main button edge detection, clear greetingMode on press
 
 === HIGH-CHURN FILES (last 90 days, top 20) ===
-  17 gemini_LLM_btn/gemini_LLM_btn.ino
-  15 agentic_companion.py
-   3 docs/codebase/.codebase-scan.txt
-   3 docs/codebase/ARCHITECTURE.md
-   3 reminders.json
-   2 docs/codebase/CONCERNS.md
-   2 docs/codebase/CONVENTIONS.md
-   2 docs/codebase/INTEGRATIONS.md
-   2 docs/codebase/STACK.md
-   2 gemini_LLM_btn/config.h
-   2 requirements.txt
-   2 gemini_LLM_btn/images.h
-   1 docs/codebase/STRUCTURE.md
-   1 docs/codebase/TESTING.md
-   1 recordings_analysis/rec_20260628_220511.wav
-   1 recordings_analysis/rec_20260628_220554.wav
-   1 recordings_analysis/rec_20260628_220649.wav
-   1 .gitignore
-   1 .vscode/arduino.json
-   1 .vscode/c_cpp_properties.json
+  22 agentic_companion.py
+  19 gemini_LLM_btn/gemini_LLM_btn.ino
+   7 reminders.json
+   5 table_bondhu_app/lib/main.dart
+   4 docs/codebase/.codebase-scan.txt
+   4 docs/codebase/ARCHITECTURE.md
+   3 COMPANION_GUIDE.md
+   3 table_bondhu_app/android/app/src/main/AndroidManifest.xml
+   3 gemini_LLM_btn/images.h
+   3 requirements.txt
+   3 docs/codebase/CONCERNS.md
+   3 docs/codebase/CONVENTIONS.md
+   3 docs/codebase/INTEGRATIONS.md
+   3 docs/codebase/STACK.md
+   2 table_bondhu_app/android/app/build.gradle.kts
+   2 table_bondhu_app/linux/flutter/generated_plugin_registrant.cc
+   2 table_bondhu_app/linux/flutter/generated_plugins.cmake
+   2 table_bondhu_app/macos/Flutter/GeneratedPluginRegistrant.swift
+   2 table_bondhu_app/pubspec.lock
+   2 table_bondhu_app/pubspec.yaml
 
 === MONOREPO SIGNALS ===
 No monorepo signals detected.
 
 === CODE METRICS ===
-Total files scanned: 47
-Total lines of code: 1422
+Total files scanned: 286
+Total lines of code: 4311
 
 Files by language:
-  Other: 43
-  Python: 2
-  C Header: 2
+  Other: 260
+  C Header: 11
+  Swift: 6
+  C++: 4
+  Python: 3
+  Java: 1
+  Kotlin: 1
 
 Top 10 largest files:
-gemini_LLM_btn\images.h: 3413.2KB
+table_bondhu_app\.dart_tool\flutter_build\a8cca360341b22a5288426a8f8232cb3\app.dill: 29423.5KB
+gemini_LLM_btn\images.h: 4396.0KB
+table_bondhu_app\android\.gradle\8.12\executionHistory\executionHistory.bin: 3144.4KB
 assets\Pikachu\eyes_open_mouth_open_60.png: 1090.0KB
+table_bondhu_app\assets\Pikachu\eyes_open_mouth_open_60.png: 1090.0KB
 assets\girl\wave_1.png: 789.8KB
+table_bondhu_app\assets\girl\wave_1.png: 789.8KB
 assets\Pikachu\eyes_open_mouth_open_20.png: 759.1KB
+table_bondhu_app\assets\Pikachu\eyes_open_mouth_open_20.png: 759.1KB
 assets\Pikachu\peek_4.png: 746.2KB
-assets\Pikachu\eyes_closed_mouth_open.png: 684.1KB
-assets\Pikachu\wave_2.png: 680.0KB
-assets\Pikachu\wave_1.png: 318.7KB
-assets\Pikachu\wave_3.png: 297.6KB
-assets\girl\wave_2.jpeg: 164.1KB
 
 === CI/CD PIPELINES ===
 No CI/CD pipelines detected.

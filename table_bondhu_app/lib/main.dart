@@ -1311,42 +1311,114 @@ class SleepScreen extends StatefulWidget {
   State<SleepScreen> createState() => _SleepScreenState();
 }
 
-class _SleepScreenState extends State<SleepScreen> {
+class _SleepScreenState extends State<SleepScreen>
+    with SingleTickerProviderStateMixin {
   List<dynamic> _sessions = [];
   bool _isLoading = false;
   String _scheduledTime = "Not Set";
 
+  // Active sleep state
+  bool _isSleeping = false;
+  DateTime? _sleepStartTime;
+  Timer? _elapsedTimer;
+  String _elapsedStr = "00:00:00";
+
+  // Last wake summary
+  Map<String, dynamic>? _lastWakeSummary;
+
+  // Sleep window ("away from home" protection)
+  int _windowStart = 22; // 10 PM default
+  int _windowEnd   = 10; // 10 AM default
+
+  late AnimationController _pulseCtrl;
+  late Animation<double> _pulseAnim;
+
   @override
   void initState() {
     super.initState();
+    _pulseCtrl = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 1500),
+    )..repeat(reverse: true);
+    _pulseAnim = Tween<double>(begin: 0.95, end: 1.05).animate(
+      CurvedAnimation(parent: _pulseCtrl, curve: Curves.easeInOut),
+    );
+    _fetchSleepStatus();
     _fetchSleepLogs();
     _fetchScheduledTime();
+    _fetchSleepWindow();
+  }
+
+  @override
+  void dispose() {
+    _elapsedTimer?.cancel();
+    _pulseCtrl.dispose();
+    super.dispose();
+  }
+
+  // ---- Elapsed timer ----
+  void _startElapsedTimer() {
+    _elapsedTimer?.cancel();
+    _elapsedTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (!mounted || _sleepStartTime == null) return;
+      final elapsed = DateTime.now().difference(_sleepStartTime!);
+      setState(() {
+        final h = elapsed.inHours.toString().padLeft(2, '0');
+        final m = (elapsed.inMinutes % 60).toString().padLeft(2, '0');
+        final s = (elapsed.inSeconds % 60).toString().padLeft(2, '0');
+        _elapsedStr = "$h:$m:$s";
+      });
+    });
+  }
+
+  // ---- Fetch persisted sleep status from server ----
+  Future<void> _fetchSleepStatus() async {
+    try {
+      final response = await http.get(
+        Uri.parse('http://${widget.serverIp}:8888/api/sleep/status'),
+      ).timeout(const Duration(seconds: 5));
+
+      if (response.statusCode == 200) {
+        final data = json.decode(response.body);
+        final isSleeping = data['is_sleeping'] == true;
+        DateTime? startTime;
+        if (data['start_time'] != null) {
+          try {
+            startTime = DateTime.parse(data['start_time'].toString());
+          } catch (_) {
+            // start_time may be a unix timestamp
+            try {
+              startTime = DateTime.fromMillisecondsSinceEpoch(
+                  (data['start_time'] as num).toInt() * 1000);
+            } catch (_) {}
+          }
+        }
+        if (mounted) {
+          setState(() {
+            _isSleeping = isSleeping;
+            _sleepStartTime = startTime;
+          });
+          if (isSleeping) {
+            _startElapsedTimer();
+          }
+        }
+      }
+    } catch (_) {}
   }
 
   Future<void> _fetchSleepLogs() async {
     if (!mounted) return;
-    setState(() {
-      _isLoading = true;
-    });
-
+    setState(() => _isLoading = true);
     try {
       final response = await http.get(
         Uri.parse('http://${widget.serverIp}:8888/api/sleep'),
       ).timeout(const Duration(seconds: 5));
-
       if (response.statusCode == 200) {
-        setState(() {
-          _sessions = json.decode(response.body);
-        });
+        setState(() => _sessions = json.decode(response.body));
       }
-    } catch (e) {
-      // Fail silently
+    } catch (_) {
     } finally {
-      if (mounted) {
-        setState(() {
-          _isLoading = false;
-        });
-      }
+      if (mounted) setState(() => _isLoading = false);
     }
   }
 
@@ -1355,35 +1427,101 @@ class _SleepScreenState extends State<SleepScreen> {
       final response = await http.get(
         Uri.parse('http://${widget.serverIp}:8888/api/sleep/schedule'),
       ).timeout(const Duration(seconds: 5));
-
       if (response.statusCode == 200) {
         final data = json.decode(response.body);
         final timeStr = data['scheduled_time'];
-        if (timeStr != null && timeStr.toString().isNotEmpty) {
-          setState(() {
-            _scheduledTime = _formatTimeStr(timeStr.toString());
-          });
+        if (timeStr != null && timeStr.toString().isNotEmpty && mounted) {
+          setState(() => _scheduledTime = _formatTimeStr(timeStr.toString()));
         }
       }
-    } catch (e) {
-      // Fail silently
+    } catch (_) {}
+  }
+
+  // ---- Sleep Window ----
+  Future<void> _fetchSleepWindow() async {
+    try {
+      final response = await http.get(
+        Uri.parse('http://${widget.serverIp}:8888/api/sleep/window'),
+      ).timeout(const Duration(seconds: 5));
+      if (response.statusCode == 200 && mounted) {
+        final data = json.decode(response.body);
+        setState(() {
+          _windowStart = (data['start_hour'] as num?)?.toInt() ?? 22;
+          _windowEnd   = (data['end_hour']   as num?)?.toInt() ?? 10;
+        });
+      }
+    } catch (_) {}
+  }
+
+  Future<void> _saveSleepWindow(int start, int end) async {
+    try {
+      final response = await http.post(
+        Uri.parse('http://${widget.serverIp}:8888/api/sleep/window'),
+        headers: {'Content-Type': 'application/json'},
+        body: json.encode({'start_hour': start, 'end_hour': end}),
+      ).timeout(const Duration(seconds: 5));
+      if (response.statusCode == 200 && mounted) {
+        setState(() {
+          _windowStart = start;
+          _windowEnd   = end;
+        });
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              'Sleep window set: ${_fmtHour(start)} → ${_fmtHour(end)}',
+            ),
+          ),
+        );
+      }
+    } catch (_) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Failed to update sleep window.')),
+        );
+      }
     }
   }
 
+  String _fmtHour(int h) {
+    final suffix = h >= 12 ? 'PM' : 'AM';
+    final display = h > 12 ? h - 12 : (h == 0 ? 12 : h);
+    return '$display:00 $suffix';
+  }
+
+  void _pickSleepWindow() async {
+    // Pick start first, then end
+    final startPicked = await showTimePicker(
+      context: context,
+      initialTime: TimeOfDay(hour: _windowStart, minute: 0),
+      helpText: 'Auto-sleep STARTS at (e.g. 10 PM)',
+    );
+    if (startPicked == null || !mounted) return;
+
+    final endPicked = await showTimePicker(
+      context: context,
+      initialTime: TimeOfDay(hour: _windowEnd, minute: 0),
+      helpText: 'Auto-sleep ENDS at (e.g. 10 AM)',
+    );
+    if (endPicked == null || !mounted) return;
+
+    await _saveSleepWindow(startPicked.hour, endPicked.hour);
+  }
+
   String _formatTimeStr(String militaryTime) {
+
     try {
       final parts = militaryTime.split(":");
       final h = int.parse(parts[0]);
       final m = int.parse(parts[1]);
       final suffix = h >= 12 ? "PM" : "AM";
       final displayH = h > 12 ? h - 12 : (h == 0 ? 12 : h);
-      final displayM = m.toString().padLeft(2, '0');
-      return "$displayH:$displayM $suffix";
-    } catch (e) {
+      return "$displayH:${m.toString().padLeft(2, '0')} $suffix";
+    } catch (_) {
       return militaryTime;
     }
   }
 
+  // ---- Manual Sleep Start ----
   void _triggerInstantSleep(String type) async {
     try {
       final response = await http.post(
@@ -1393,20 +1531,21 @@ class _SleepScreenState extends State<SleepScreen> {
       ).timeout(const Duration(seconds: 5));
 
       if (response.statusCode == 200) {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('Successfully started instant ${type == "sleep" ? "sleep" : "nap"}! ESP32 screen updated.')),
-          );
-        }
+        setState(() {
+          _isSleeping = true;
+          _sleepStartTime = DateTime.now();
+          _lastWakeSummary = null;
+        });
+        _startElapsedTimer();
       } else {
         final errorMsg = json.decode(response.body)['error'] ?? "Unknown error";
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text(errorMsg)),
+            SnackBar(content: Text(errorMsg), backgroundColor: Colors.redAccent),
           );
         }
       }
-    } catch (e) {
+    } catch (_) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('Failed to connect to companion server.')),
@@ -1415,32 +1554,65 @@ class _SleepScreenState extends State<SleepScreen> {
     }
   }
 
+  // ---- Manual Wake Up ----
+  void _triggerManualWake() async {
+    try {
+      final response = await http.post(
+        Uri.parse('http://${widget.serverIp}:8888/api/sleep/wake'),
+        headers: {'Content-Type': 'application/json'},
+        body: json.encode({}),
+      ).timeout(const Duration(seconds: 8));
+
+      if (response.statusCode == 200) {
+        final data = json.decode(response.body);
+        final session = data['session'] as Map<String, dynamic>?;
+        _elapsedTimer?.cancel();
+        setState(() {
+          _isSleeping = false;
+          _sleepStartTime = null;
+          _elapsedStr = "00:00:00";
+          _lastWakeSummary = session;
+        });
+        // Refresh logs
+        _fetchSleepLogs();
+      } else {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Wake request failed.'), backgroundColor: Colors.redAccent),
+          );
+        }
+      }
+    } catch (_) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Failed to connect to companion server.')),
+        );
+      }
+    }
+  }
+
+  // ---- Bedtime Picker ----
   void _selectBedtime() async {
     final TimeOfDay? picked = await showTimePicker(
       context: context,
       initialTime: const TimeOfDay(hour: 22, minute: 0),
     );
-
     if (picked != null) {
-      final militaryTime = "${picked.hour.toString().padLeft(2, '0')}:${picked.minute.toString().padLeft(2, '0')}";
+      final militaryTime =
+          "${picked.hour.toString().padLeft(2, '0')}:${picked.minute.toString().padLeft(2, '0')}";
       try {
         final response = await http.post(
           Uri.parse('http://${widget.serverIp}:8888/api/sleep/schedule'),
           headers: {'Content-Type': 'application/json'},
           body: json.encode({'time': militaryTime}),
         ).timeout(const Duration(seconds: 5));
-
-        if (response.statusCode == 200) {
-          setState(() {
-            _scheduledTime = _formatTimeStr(militaryTime);
-          });
-          if (mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(
-              SnackBar(content: Text('Bedtime scheduled for $_scheduledTime')),
-            );
-          }
+        if (response.statusCode == 200 && mounted) {
+          setState(() => _scheduledTime = _formatTimeStr(militaryTime));
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Bedtime scheduled for $_scheduledTime')),
+          );
         }
-      } catch (e) {
+      } catch (_) {
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(content: Text('Failed to save scheduled bedtime.')),
@@ -1457,10 +1629,183 @@ class _SleepScreenState extends State<SleepScreen> {
     return Colors.orange;
   }
 
+  // ============================================================
+  // ACTIVE SLEEP OVERLAY — shown when _isSleeping is true
+  // ============================================================
+  Widget _buildActiveSleepOverlay() {
+    return Container(
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          begin: Alignment.topCenter,
+          end: Alignment.bottomCenter,
+          colors: [
+            const Color(0xFF0A0A1A),
+            const Color(0xFF0D0D2B),
+          ],
+        ),
+      ),
+      child: Column(
+        children: [
+          const SizedBox(height: 40),
+          // Stars decorative header
+          const Text(
+            '✦  Sleep Mode Active  ✦',
+            style: TextStyle(
+              color: Color(0xFFB0B8FF),
+              fontSize: 14,
+              letterSpacing: 2,
+              fontWeight: FontWeight.w300,
+            ),
+          ),
+          const SizedBox(height: 32),
+          // Pulsing Pikachu sleeping animation
+          ScaleTransition(
+            scale: _pulseAnim,
+            child: const PikaSleepingAnimation(size: 140),
+          ),
+          const SizedBox(height: 28),
+          // Elapsed time display
+          Text(
+            _elapsedStr,
+            style: const TextStyle(
+              fontSize: 40,
+              fontWeight: FontWeight.bold,
+              color: Colors.white,
+              letterSpacing: 3,
+              fontFeatures: [FontFeature.tabularFigures()],
+            ),
+          ),
+          const SizedBox(height: 8),
+          const Text(
+            'Sleep in progress',
+            style: TextStyle(color: Color(0xFF8888AA), fontSize: 14),
+          ),
+          if (_sleepStartTime != null) ...[
+            const SizedBox(height: 4),
+            Text(
+              'Started at ${_sleepStartTime!.hour.toString().padLeft(2, '0')}:${_sleepStartTime!.minute.toString().padLeft(2, '0')}',
+              style: const TextStyle(color: Color(0xFF6666AA), fontSize: 12),
+            ),
+          ],
+          const Spacer(),
+          // Wake Up button — large, prominent
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 40, vertical: 48),
+            child: SizedBox(
+              width: double.infinity,
+              height: 60,
+              child: ElevatedButton.icon(
+                onPressed: _triggerManualWake,
+                icon: const Icon(Icons.wb_sunny_rounded, size: 24),
+                label: const Text(
+                  'Wake Up',
+                  style: TextStyle(
+                    fontSize: 18,
+                    fontWeight: FontWeight.bold,
+                    letterSpacing: 1,
+                  ),
+                ),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: const Color(0xFFFEE000),
+                  foregroundColor: Colors.black,
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(16),
+                  ),
+                  elevation: 8,
+                  shadowColor: const Color(0xFFFEE000).withValues(alpha: 0.4),
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ============================================================
+  // WAKE SUMMARY CARD — shown right after manual wake-up
+  // ============================================================
+  Widget _buildWakeSummaryCard(Map<String, dynamic> summary) {
+    final durationH = summary['duration_hours'] ?? 0.0;
+    final type = summary['type'] ?? "nap";
+    final quality = summary['quality'] ?? "Fair";
+    final movements = summary['movement_count'] ?? 0;
+    final avgNoise = summary['average_noise'] ?? 0.0;
+    final avgLdr = summary['average_ldr'] ?? 0.0;
+    final typeName = type == "actual_sleep" ? "Sleep" : "Nap";
+    final qualityColor = _getQualityColor(quality);
+
+    return Card(
+      margin: const EdgeInsets.all(16),
+      color: const Color(0xFF1A1A2E),
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(16),
+        side: BorderSide(color: const Color(0xFFFEE000).withValues(alpha: 0.3), width: 1),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.all(20.0),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.center,
+          children: [
+            Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                const Icon(Icons.wb_sunny_rounded, color: Color(0xFFFEE000), size: 20),
+                const SizedBox(width: 8),
+                const Text(
+                  'Last Session Summary',
+                  style: TextStyle(
+                    fontWeight: FontWeight.bold,
+                    fontSize: 16,
+                    color: Color(0xFFFEE000),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 16),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceAround,
+              children: [
+                _statBox('${durationH}h', typeName),
+                _statBox('$movements', 'Tosses'),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                  decoration: BoxDecoration(
+                    color: qualityColor.withValues(alpha: 0.15),
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(color: qualityColor),
+                  ),
+                  child: Text(
+                    quality.toString().toUpperCase(),
+                    style: TextStyle(
+                      fontWeight: FontWeight.bold,
+                      fontSize: 12,
+                      color: qualityColor,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 12),
+            Text(
+              'Avg Noise: ${avgNoise.toStringAsFixed(0)} RMS   |   Avg Light: ${avgLdr.toStringAsFixed(0)}',
+              style: const TextStyle(color: Colors.grey, fontSize: 11),
+              textAlign: TextAlign.center,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // ============================================================
+  // NORMAL (AWAKE) SLEEP CONTROL PANEL
+  // ============================================================
   Widget _buildSleepControlPanel() {
     return Card(
       margin: const EdgeInsets.all(16),
       color: const Color(0xFF1E1E1E),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
       child: Padding(
         padding: const EdgeInsets.all(16.0),
         child: Column(
@@ -1471,14 +1816,15 @@ class _SleepScreenState extends State<SleepScreen> {
                 Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    const Text(
-                      'Target Bedtime',
-                      style: TextStyle(color: Colors.grey, fontSize: 13),
-                    ),
+                    const Text('Target Bedtime',
+                        style: TextStyle(color: Colors.grey, fontSize: 13)),
                     const SizedBox(height: 4),
                     Text(
                       _scheduledTime,
-                      style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: Color(0xFFFEE000)),
+                      style: const TextStyle(
+                          fontSize: 20,
+                          fontWeight: FontWeight.bold,
+                          color: Color(0xFFFEE000)),
                     ),
                   ],
                 ),
@@ -1494,6 +1840,37 @@ class _SleepScreenState extends State<SleepScreen> {
                 ),
               ],
             ),
+            const Divider(height: 16, color: Colors.white10),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text('Auto-Sleep Detection Window',
+                        style: TextStyle(color: Colors.grey, fontSize: 12)),
+                    const SizedBox(height: 4),
+                    Text(
+                      '${_fmtHour(_windowStart)} - ${_fmtHour(_windowEnd)}',
+                      style: const TextStyle(
+                          fontSize: 15,
+                          fontWeight: FontWeight.bold,
+                          color: Colors.white),
+                    ),
+                  ],
+                ),
+                ElevatedButton.icon(
+                  onPressed: _pickSleepWindow,
+                  icon: const Icon(Icons.tune),
+                  label: const Text('Configure'),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.white10,
+                    foregroundColor: Colors.white,
+                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                  ),
+                ),
+              ],
+            ),
             const Divider(height: 24, color: Colors.white10),
             Row(
               children: [
@@ -1501,7 +1878,8 @@ class _SleepScreenState extends State<SleepScreen> {
                   child: ElevatedButton.icon(
                     onPressed: () => _triggerInstantSleep("sleep"),
                     icon: const Icon(Icons.nightlight_round),
-                    label: const Text('Instant Sleep', style: TextStyle(fontWeight: FontWeight.bold)),
+                    label: const Text('Instant Sleep',
+                        style: TextStyle(fontWeight: FontWeight.bold)),
                     style: ElevatedButton.styleFrom(
                       backgroundColor: const Color(0xFFFEE000),
                       foregroundColor: Colors.black,
@@ -1514,7 +1892,8 @@ class _SleepScreenState extends State<SleepScreen> {
                   child: ElevatedButton.icon(
                     onPressed: () => _triggerInstantSleep("nap"),
                     icon: const Icon(Icons.wb_sunny_outlined),
-                    label: const Text('Instant Nap', style: TextStyle(fontWeight: FontWeight.bold)),
+                    label: const Text('Instant Nap',
+                        style: TextStyle(fontWeight: FontWeight.bold)),
                     style: ElevatedButton.styleFrom(
                       backgroundColor: Colors.white12,
                       foregroundColor: Colors.white,
@@ -1523,6 +1902,35 @@ class _SleepScreenState extends State<SleepScreen> {
                   ),
                 ),
               ],
+            ),
+            const Divider(height: 20, color: Colors.white10),
+            SizedBox(
+              width: double.infinity,
+              child: ElevatedButton.icon(
+                onPressed: () {
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      builder: (context) => SleepAnalyticsScreen(
+                        sessions: _sessions,
+                        targetBedtime: _scheduledTime,
+                      ),
+                    ),
+                  );
+                },
+                icon: const Icon(Icons.bar_chart_rounded),
+                label: const Text('Detailed Analytics & Breakdown',
+                    style: TextStyle(fontWeight: FontWeight.bold)),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: const Color(0xFF9333EA).withValues(alpha: 0.15),
+                  foregroundColor: const Color(0xFFC084FC),
+                  side: BorderSide(color: const Color(0xFF9333EA).withValues(alpha: 0.4), width: 1.5),
+                  padding: const EdgeInsets.symmetric(vertical: 12),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                ),
+              ),
             ),
           ],
         ),
@@ -1538,6 +1946,7 @@ class _SleepScreenState extends State<SleepScreen> {
 
     return Card(
       margin: const EdgeInsets.only(bottom: 16),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
       child: Padding(
         padding: const EdgeInsets.all(16.0),
         child: Column(
@@ -1546,35 +1955,33 @@ class _SleepScreenState extends State<SleepScreen> {
             Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
-                Row(
-                  children: [
-                    Icon(
-                      type.toString().toLowerCase().contains("nap")
-                          ? Icons.wb_sunny
-                          : Icons.nightlight_round,
-                      color: const Color(0xFFFEE000),
-                    ),
-                    const SizedBox(width: 8),
-                    Text(
-                      '${type.toString().toUpperCase()} SESSION',
-                      style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15),
-                    ),
-                  ],
-                ),
+                Row(children: [
+                  Icon(
+                    type.toString().toLowerCase().contains("nap")
+                        ? Icons.wb_sunny
+                        : Icons.nightlight_round,
+                    color: const Color(0xFFFEE000),
+                  ),
+                  const SizedBox(width: 8),
+                  Text('${type.toString().toUpperCase()} SESSION',
+                      style: const TextStyle(
+                          fontWeight: FontWeight.bold, fontSize: 15)),
+                ]),
                 Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
                   decoration: BoxDecoration(
                     color: _getQualityColor(quality).withValues(alpha: 0.15),
                     borderRadius: BorderRadius.circular(12),
-                    border: Border.all(color: _getQualityColor(quality), width: 1),
+                    border:
+                        Border.all(color: _getQualityColor(quality), width: 1),
                   ),
                   child: Text(
                     quality.toString().toUpperCase(),
                     style: TextStyle(
-                      fontSize: 11,
-                      fontWeight: FontWeight.bold,
-                      color: _getQualityColor(quality),
-                    ),
+                        fontSize: 11,
+                        fontWeight: FontWeight.bold,
+                        color: _getQualityColor(quality)),
                   ),
                 ),
               ],
@@ -1596,38 +2003,37 @@ class _SleepScreenState extends State<SleepScreen> {
                 decoration: BoxDecoration(
                   color: Colors.redAccent.withValues(alpha: 0.1),
                   borderRadius: BorderRadius.circular(6),
-                  border: Border.all(color: Colors.redAccent.withValues(alpha: 0.3)),
+                  border: Border.all(
+                      color: Colors.redAccent.withValues(alpha: 0.3)),
                 ),
-                child: Row(
-                  children: [
-                    const Icon(Icons.warning_amber_rounded, color: Colors.redAccent, size: 18),
-                    const SizedBox(width: 8),
-                    Expanded(
-                      child: Text(
-                        'Went to bed $tardiness minutes past target bedtime!',
-                        style: const TextStyle(color: Colors.redAccent, fontSize: 12, fontWeight: FontWeight.w500),
-                      ),
+                child: Row(children: [
+                  const Icon(Icons.warning_amber_rounded,
+                      color: Colors.redAccent, size: 18),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      'Went to bed $tardiness minutes past target bedtime!',
+                      style: const TextStyle(
+                          color: Colors.redAccent,
+                          fontSize: 12,
+                          fontWeight: FontWeight.w500),
                     ),
-                  ],
-                ),
+                  ),
+                ]),
               ),
             ],
             Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
-                Text(
-                  'Started: ${session['start_time']}',
-                  style: const TextStyle(fontSize: 11, color: Colors.grey),
-                ),
-                Text(
-                  'Ended: ${session['end_time']}',
-                  style: const TextStyle(fontSize: 11, color: Colors.grey),
-                ),
+                Text('Started: ${session['start_time']}',
+                    style: const TextStyle(fontSize: 11, color: Colors.grey)),
+                Text('Ended: ${session['end_time']}',
+                    style: const TextStyle(fontSize: 11, color: Colors.grey)),
               ],
             ),
             const SizedBox(height: 8),
             Text(
-              'Noise profile: Avg ${session['average_noise'] ?? 0} RMS | Max ${session['max_noise'] ?? 0} RMS | Spikes: ${session['noise_events'] ?? 0}',
+              'Noise: Avg ${session['average_noise'] ?? 0} | Max ${session['max_noise'] ?? 0} | Spikes: ${session['noise_events'] ?? 0}',
               style: const TextStyle(fontSize: 11, color: Colors.grey),
             ),
           ],
@@ -1638,14 +2044,20 @@ class _SleepScreenState extends State<SleepScreen> {
 
   @override
   Widget build(BuildContext context) {
+    // When actively sleeping → show full-screen sleep overlay
+    if (_isSleeping) {
+      return Scaffold(body: _buildActiveSleepOverlay());
+    }
+
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Sleep Metrics History'),
+        title: const Text('Sleep & Metrics'),
         centerTitle: true,
         actions: [
           IconButton(
             icon: const Icon(Icons.refresh),
             onPressed: () {
+              _fetchSleepStatus();
               _fetchSleepLogs();
               _fetchScheduledTime();
             },
@@ -1657,15 +2069,19 @@ class _SleepScreenState extends State<SleepScreen> {
           : Column(
               children: [
                 _buildSleepControlPanel(),
+                if (_lastWakeSummary != null)
+                  _buildWakeSummaryCard(_lastWakeSummary!),
                 Expanded(
                   child: _sessions.isEmpty
                       ? Center(
                           child: Column(
                             mainAxisAlignment: MainAxisAlignment.center,
                             children: [
-                              Icon(Icons.bedtime_off, size: 64, color: Colors.grey.shade600),
+                              Icon(Icons.bedtime_off,
+                                  size: 64, color: Colors.grey.shade600),
                               const SizedBox(height: 12),
-                              const Text('No sleep logs recorded yet.', style: TextStyle(color: Colors.grey)),
+                              const Text('No sleep logs recorded yet.',
+                                  style: TextStyle(color: Colors.grey)),
                             ],
                           ),
                         )
@@ -1673,7 +2089,8 @@ class _SleepScreenState extends State<SleepScreen> {
                           padding: const EdgeInsets.symmetric(horizontal: 16),
                           itemCount: _sessions.length,
                           itemBuilder: (context, index) {
-                            final session = _sessions[_sessions.length - 1 - index];
+                            final session =
+                                _sessions[_sessions.length - 1 - index];
                             return _buildSleepLogCard(session);
                           },
                         ),
@@ -1686,19 +2103,21 @@ class _SleepScreenState extends State<SleepScreen> {
   Widget _statBox(String value, String label) {
     return Column(
       children: [
-        Text(
-          value,
-          style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: Color(0xFFFEE000)),
-        ),
+        Text(value,
+            style: const TextStyle(
+                fontSize: 20,
+                fontWeight: FontWeight.bold,
+                color: Color(0xFFFEE000))),
         const SizedBox(height: 4),
-        Text(
-          label,
-          style: const TextStyle(fontSize: 11, color: Colors.grey),
-        ),
+        Text(label,
+            style: const TextStyle(fontSize: 11, color: Colors.grey)),
       ],
     );
   }
 }
+
+
+
 
 // --------------------------------------------------
 // PIKACHU ANIMATED WIDGETS
@@ -1892,3 +2311,685 @@ class _PikaWavingAnimationState extends State<PikaWavingAnimation> {
     );
   }
 }
+
+// --------------------------------------------------
+// SLEEP ANALYTICS SCREEN & CUSTOM BREAKDOWN VIEW
+// --------------------------------------------------
+
+class SleepAnalyticsScreen extends StatefulWidget {
+  final List<dynamic> sessions;
+  final String targetBedtime;
+
+  const SleepAnalyticsScreen({
+    super.key,
+    required this.sessions,
+    required this.targetBedtime,
+  });
+
+  @override
+  State<SleepAnalyticsScreen> createState() => _SleepAnalyticsScreenState();
+}
+
+class _SleepAnalyticsScreenState extends State<SleepAnalyticsScreen> {
+  // Statistics variables
+  double _avgDuration = 0.0;
+  double _avgTosses = 0.0;
+  double _avgNoise = 0.0;
+  double _avgLdr = 0.0;
+
+  double _goodRatio = 0.0;
+  double _fairRatio = 0.0;
+  double _poorRatio = 0.0;
+
+  int _totalNaps = 0;
+  int _totalSleeps = 0;
+  int _totalTardy = 0;
+  double _avgTardyMins = 0.0;
+
+  @override
+  void initState() {
+    super.initState();
+    _calculateStats();
+  }
+
+  void _calculateStats() {
+    if (widget.sessions.isEmpty) return;
+
+    double totalDuration = 0.0;
+    double totalTosses = 0.0;
+    double totalNoise = 0.0;
+    double totalLdr = 0.0;
+
+    int goodCount = 0;
+    int fairCount = 0;
+    int poorCount = 0;
+
+    int tardyCount = 0;
+    double totalTardyMins = 0.0;
+
+    for (final session in widget.sessions) {
+      final duration = (session['duration_hours'] as num?)?.toDouble() ?? 0.0;
+      totalDuration += duration;
+
+      final tosses = (session['movement_count'] as num?)?.toDouble() ?? 0.0;
+      totalTosses += tosses;
+
+      final noise = (session['average_noise'] as num?)?.toDouble() ?? 0.0;
+      totalNoise += noise;
+
+      final ldr = (session['average_ldr'] as num?)?.toDouble() ?? 150.0;
+      totalLdr += ldr;
+
+      final type = (session['type'] as String?)?.toLowerCase() ?? 'sleep';
+      if (type.contains('nap')) {
+        _totalNaps++;
+      } else {
+        _totalSleeps++;
+      }
+
+      final quality = (session['quality'] as String?)?.toLowerCase() ?? 'fair';
+      if (quality.contains('good')) {
+        goodCount++;
+      } else if (quality.contains('poor')) {
+        poorCount++;
+      } else {
+        fairCount++;
+      }
+
+      final tardy = (session['tardiness_minutes'] as num?)?.toInt() ?? 0;
+      if (tardy > 0) {
+        tardyCount++;
+        totalTardyMins += tardy;
+      }
+    }
+
+    final len = widget.sessions.length;
+    setState(() {
+      _avgDuration = totalDuration / len;
+      _avgTosses = totalTosses / len;
+      _avgNoise = totalNoise / len;
+      _avgLdr = totalLdr / len;
+
+      _goodRatio = goodCount / len;
+      _fairRatio = fairCount / len;
+      _poorRatio = poorCount / len;
+
+      _totalTardy = tardyCount;
+      if (tardyCount > 0) {
+        _avgTardyMins = totalTardyMins / tardyCount;
+      }
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final recentSessions = widget.sessions.length > 8 
+        ? widget.sessions.sublist(widget.sessions.length - 8)
+        : widget.sessions;
+
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Sleep Diagnostics'),
+        centerTitle: true,
+        elevation: 0,
+        backgroundColor: Colors.transparent,
+      ),
+      extendBodyBehindAppBar: false,
+      body: widget.sessions.isEmpty
+          ? Center(
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  const PikaSearchAnimation(size: 140),
+                  const SizedBox(height: 16),
+                  const Text(
+                    'No metrics to analyze yet.\nLog some sleep sessions to unlock detailed reports.',
+                    style: TextStyle(color: Colors.grey),
+                    textAlign: TextAlign.center,
+                  ),
+                ],
+              ),
+            )
+          : SingleChildScrollView(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  // Header Overview
+                  _buildMainMetricsHeader(),
+                  const SizedBox(height: 20),
+
+                  // Trend Chart
+                  _buildTrendChart(recentSessions),
+                  const SizedBox(height: 20),
+
+                  // Diagnostics and Ratios Row
+                  Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Expanded(child: _buildQualitySection()),
+                      const SizedBox(width: 12),
+                      Expanded(child: _buildEnvironmentalDiagnostics()),
+                    ],
+                  ),
+                  const SizedBox(height: 20),
+
+                  // Bedtime Tardiness Breakdown
+                  _buildBedtimeAnalyticsCard(),
+                  const SizedBox(height: 20),
+
+                  // Sleep Hygiene Suggestions
+                  _buildSleepHygieneCard(),
+                  const SizedBox(height: 24),
+                ],
+              ),
+            ),
+    );
+  }
+
+  Widget _buildMainMetricsHeader() {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(20),
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          colors: [
+            const Color(0xFF7C3AED).withValues(alpha: 0.2),
+            const Color(0xFF4F46E5).withValues(alpha: 0.05),
+          ],
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+        ),
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: const Color(0xFF7C3AED).withValues(alpha: 0.25)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Row(
+                children: [
+                  Container(
+                    padding: const EdgeInsets.all(8),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF7C3AED).withValues(alpha: 0.2),
+                      shape: BoxShape.circle,
+                    ),
+                    child: const Icon(Icons.auto_awesome_rounded, color: Color(0xFFC084FC), size: 20),
+                  ),
+                  const SizedBox(width: 10),
+                  const Text(
+                    'Overall Sleep Score',
+                    style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Colors.white),
+                  ),
+                ],
+              ),
+              const PikaSleepingAnimation(size: 50),
+            ],
+          ),
+          const SizedBox(height: 16),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    _fmtDurationScore(),
+                    style: const TextStyle(fontSize: 28, fontWeight: FontWeight.bold, color: Color(0xFFFEE000)),
+                  ),
+                  const SizedBox(height: 4),
+                  const Text(
+                    'Average Duration',
+                    style: TextStyle(color: Colors.grey, fontSize: 12),
+                  ),
+                ],
+              ),
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    _avgTosses.toStringAsFixed(1),
+                    style: const TextStyle(fontSize: 28, fontWeight: FontWeight.bold, color: Colors.white),
+                  ),
+                  const SizedBox(height: 4),
+                  const Text(
+                    'Avg Tosses / Session',
+                    style: TextStyle(color: Colors.grey, fontSize: 12),
+                  ),
+                ],
+              ),
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    '${widget.sessions.length}',
+                    style: const TextStyle(fontSize: 28, fontWeight: FontWeight.bold, color: Colors.white),
+                  ),
+                  const SizedBox(height: 4),
+                  const Text(
+                    'Sessions Logged',
+                    style: TextStyle(color: Colors.grey, fontSize: 12),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  String _fmtDurationScore() {
+    final h = _avgDuration.toInt();
+    final m = ((_avgDuration - h) * 60).toInt();
+    if (h == 0) return '${m}m';
+    return '${h}h ${m}m';
+  }
+
+  Widget _buildTrendChart(List<dynamic> recent) {
+    return Card(
+      color: const Color(0xFF1A1A1A),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+      child: Padding(
+        padding: const EdgeInsets.all(16.0),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                const Text(
+                  'Sleep Duration Trend',
+                  style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14, color: Colors.white),
+                ),
+                Text(
+                  'Last ${recent.length} Sessions',
+                  style: const TextStyle(color: Colors.grey, fontSize: 11),
+                ),
+              ],
+            ),
+            const SizedBox(height: 24),
+            SizedBox(
+              height: 120,
+              width: double.infinity,
+              child: CustomPaint(
+                painter: SleepDurationChartPainter(recent),
+              ),
+            ),
+            const SizedBox(height: 10),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: const [
+                Text('Older', style: TextStyle(color: Colors.grey, fontSize: 10)),
+                Text('Most Recent', style: TextStyle(color: Colors.grey, fontSize: 10)),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildQualitySection() {
+    return Card(
+      color: const Color(0xFF1A1A1A),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+      child: Padding(
+        padding: const EdgeInsets.all(16.0),
+        child: Column(
+          children: [
+            const Text(
+              'Quality Ratio',
+              style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13, color: Colors.white),
+            ),
+            const SizedBox(height: 20),
+            SizedBox(
+              width: 90,
+              height: 90,
+              child: CustomPaint(
+                painter: SleepQualityPiePainter(_goodRatio, _fairRatio, _poorRatio),
+                child: Center(
+                  child: Text(
+                    '${(_goodRatio * 100).toStringAsFixed(0)}%',
+                    style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Colors.green),
+                  ),
+                ),
+              ),
+            ),
+            const SizedBox(height: 16),
+            _buildQualityLegendRow(Colors.green, 'Good', _goodRatio),
+            const SizedBox(height: 6),
+            _buildQualityLegendRow(Colors.orange, 'Fair', _fairRatio),
+            const SizedBox(height: 6),
+            _buildQualityLegendRow(Colors.redAccent, 'Poor', _poorRatio),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildQualityLegendRow(Color color, String label, double ratio) {
+    return Row(
+      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+      children: [
+        Row(
+          children: [
+            Container(width: 8, height: 8, decoration: BoxDecoration(color: color, shape: BoxShape.circle)),
+            const SizedBox(width: 6),
+            Text(label, style: const TextStyle(fontSize: 11, color: Colors.grey)),
+          ],
+        ),
+        Text(
+          '${(ratio * 100).toStringAsFixed(0)}%',
+          style: const TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: Colors.white),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildEnvironmentalDiagnostics() {
+    return Card(
+      color: const Color(0xFF1A1A1A),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+      child: Padding(
+        padding: const EdgeInsets.all(16.0),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Center(
+              child: Text(
+                'Environment Stats',
+                style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13, color: Colors.white),
+              ),
+            ),
+            const SizedBox(height: 16),
+            _environmentalItem(Icons.nightlight_outlined, 'Average Light', '${_avgLdr.toStringAsFixed(0)} LDR', _ldrAssessment()),
+            const Divider(height: 20, color: Colors.white10),
+            _environmentalItem(Icons.volume_up_outlined, 'Noise Profile', '${_avgNoise.toStringAsFixed(0)} RMS', _noiseAssessment()),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _environmentalItem(IconData icon, String title, String value, String desc) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            Icon(icon, size: 16, color: const Color(0xFFFEE000)),
+            const SizedBox(width: 6),
+            Text(title, style: const TextStyle(fontSize: 11, color: Colors.grey)),
+          ],
+        ),
+        const SizedBox(height: 6),
+        Text(value, style: const TextStyle(fontSize: 14, fontWeight: FontWeight.bold, color: Colors.white)),
+        const SizedBox(height: 2),
+        Text(desc, style: const TextStyle(fontSize: 10, color: Colors.grey)),
+      ],
+    );
+  }
+
+  String _ldrAssessment() {
+    if (_avgLdr < 300) return 'Optimal pitch black darkness.';
+    if (_avgLdr < 700) return 'Acceptable brightness level.';
+    return 'Room too bright. Use curtains.';
+  }
+
+  String _noiseAssessment() {
+    if (_avgNoise < 250) return 'Very quiet room, ideal.';
+    if (_avgNoise < 500) return 'Moderate noise levels.';
+    return 'Noisy ambient. Try earplugs.';
+  }
+
+  Widget _buildBedtimeAnalyticsCard() {
+    final hasBedtime = widget.targetBedtime != "Not Set";
+    return Card(
+      color: const Color(0xFF1A1A1A),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+      child: Padding(
+        padding: const EdgeInsets.all(16.0),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                const Icon(Icons.bedtime_rounded, color: Color(0xFFFEE000), size: 18),
+                const SizedBox(width: 8),
+                const Text(
+                  'Bedtime Schedule Adherence',
+                  style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13, color: Colors.white),
+                ),
+              ],
+            ),
+            const Divider(height: 24, color: Colors.white10),
+            if (!hasBedtime) ...[
+              const Text(
+                'No bedtime scheduled. Add a target bedtime to track tardiness and schedule compliance metrics.',
+                style: TextStyle(color: Colors.grey, fontSize: 12),
+              ),
+            ] else ...[
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  _bedtimeMetric('Target Time', widget.targetBedtime),
+                  _bedtimeMetric('Tardy Rate', '${((_totalTardy / (_totalSleeps + _totalNaps)) * 100).toStringAsFixed(0)}%'),
+                  _bedtimeMetric('Avg Latency', '${_avgTardyMins.toStringAsFixed(0)} mins'),
+                ],
+              ),
+              const SizedBox(height: 12),
+              Text(
+                _tardyReportDescription(),
+                style: const TextStyle(color: Colors.grey, fontSize: 11),
+              ),
+            ]
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _bedtimeMetric(String title, String val) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(title, style: const TextStyle(color: Colors.grey, fontSize: 11)),
+        const SizedBox(height: 4),
+        Text(val, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Colors.white)),
+      ],
+    );
+  }
+
+  String _tardyReportDescription() {
+    if (_totalTardy == 0) return 'Excellent! You consistently go to sleep within your bedtime window.';
+    if (_avgTardyMins < 30) return 'Good job. You are rarely late for bed, usually within 30 minutes.';
+    return 'Caution: You frequently miss your scheduled bedtime. Aim to reduce late-night activities.';
+  }
+
+  Widget _buildSleepHygieneCard() {
+    return Card(
+      color: const Color(0xFF1E1B4B).withValues(alpha: 0.3),
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(16),
+        side: BorderSide(color: const Color(0xFF4F46E5).withValues(alpha: 0.3)),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.all(16.0),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                const Icon(Icons.lightbulb_outline_rounded, color: Color(0xFFFEE000), size: 20),
+                const SizedBox(width: 8),
+                const Text(
+                  'Sleep Hygiene Insights',
+                  style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14, color: Colors.white),
+                ),
+              ],
+            ),
+            const SizedBox(height: 12),
+            Text(
+              _generateHygieneRecommendation(),
+              style: const TextStyle(color: Color(0xFFC7D2FE), fontSize: 12, height: 1.4),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  String _generateHygieneRecommendation() {
+    if (_avgLdr >= 500) {
+      return '• Ambient light detected is higher than normal. Turning off auxiliary lights or getting thick curtains will improve melatonin secretion.\n• Sleep environment is critical for deep stage cycles.';
+    }
+    if (_avgTosses >= 6.0) {
+      return '• Significant motion/tosses logged. High activity usually points to light sleep. Try adjusting room temperature (aim for 18-20°C) or avoid heavy meals 3 hours before bed.';
+    }
+    if (_avgNoise >= 400) {
+      return '• Frequent noise events/spikes recorded. Ambient sounds interfere with REM sleep. Consider white noise devices or soundproofing solutions to protect sleep continuity.';
+    }
+    return '• All metrics fall within ideal zones. Excellent work! Keep maintaining your scheduled bedtime and dark sleep setting to preserve high health parameters.';
+  }
+}
+
+class SleepDurationChartPainter extends CustomPainter {
+  final List<dynamic> sessions;
+  SleepDurationChartPainter(this.sessions);
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    if (sessions.isEmpty) return;
+
+    final paintLine = Paint()
+      ..color = const Color(0xFFC084FC)
+      ..strokeWidth = 3
+      ..style = PaintingStyle.stroke
+      ..strokeCap = StrokeCap.round;
+
+    final paintPoint = Paint()
+      ..color = const Color(0xFFFEE000)
+      ..style = PaintingStyle.fill;
+
+    final paintGrid = Paint()
+      ..color = Colors.white10
+      ..strokeWidth = 1;
+
+    final double maxVal = sessions.map((s) => (s['duration_hours'] as num?)?.toDouble() ?? 0.0).fold(8.0, (m, v) => v > m ? v : m);
+    final int count = sessions.length;
+    final double stepX = count > 1 ? size.width / (count - 1) : size.width;
+
+    // Draw horizontal grid lines
+    for (int i = 0; i <= 4; i++) {
+      final double y = size.height - (i * size.height / 4);
+      canvas.drawLine(Offset(0, y), Offset(size.width, y), paintGrid);
+    }
+
+    final points = <Offset>[];
+    for (int i = 0; i < count; i++) {
+      final double duration = (sessions[i]['duration_hours'] as num?)?.toDouble() ?? 0.0;
+      final double x = i * stepX;
+      final double y = size.height - (duration / maxVal * size.height);
+      points.add(Offset(x, y));
+    }
+
+    if (points.length > 1) {
+      final path = Path()..moveTo(points.first.dx, points.first.dy);
+      for (int i = 1; i < points.length; i++) {
+        // Curve to make it look smooth and premium
+        final p0 = points[i - 1];
+        final p1 = points[i];
+        final controlX1 = p0.dx + (p1.dx - p0.dx) / 2;
+        path.cubicTo(controlX1, p0.dy, controlX1, p1.dy, p1.dx, p1.dy);
+      }
+      canvas.drawPath(path, paintLine);
+    }
+
+    for (final pt in points) {
+      canvas.drawCircle(pt, 5, paintPoint);
+      canvas.drawCircle(pt, 8, Paint()..color = const Color(0xFFFEE000).withValues(alpha: 0.3)..style = PaintingStyle.stroke..strokeWidth = 2);
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant CustomPainter oldDelegate) => true;
+}
+
+class SleepQualityPiePainter extends CustomPainter {
+  final double goodPct;
+  final double fairPct;
+  final double poorPct;
+
+  SleepQualityPiePainter(this.goodPct, this.fairPct, this.poorPct);
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final double radius = size.width / 2;
+    final Offset center = Offset(size.width / 2, size.height / 2);
+    final double strokeWidth = 14;
+
+    final paintGood = Paint()
+      ..color = Colors.green
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = strokeWidth
+      ..strokeCap = StrokeCap.round;
+
+    final paintFair = Paint()
+      ..color = Colors.orange
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = strokeWidth
+      ..strokeCap = StrokeCap.round;
+
+    final paintPoor = Paint()
+      ..color = Colors.redAccent
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = strokeWidth
+      ..strokeCap = StrokeCap.round;
+
+    double startAngle = -3.14159 / 2; // top of circle
+
+    // Draw segment by segment
+    if (goodPct > 0) {
+      final sweepAngle = 2 * 3.14159265 * goodPct;
+      canvas.drawArc(
+        Rect.fromCircle(center: center, radius: radius - strokeWidth/2),
+        startAngle,
+        sweepAngle,
+        false,
+        paintGood,
+      );
+      startAngle += sweepAngle;
+    }
+
+    if (fairPct > 0) {
+      final sweepAngle = 2 * 3.14159265 * fairPct;
+      canvas.drawArc(
+        Rect.fromCircle(center: center, radius: radius - strokeWidth/2),
+        startAngle,
+        sweepAngle,
+        false,
+        paintFair,
+      );
+      startAngle += sweepAngle;
+    }
+
+    if (poorPct > 0) {
+      final sweepAngle = 2 * 3.14159265 * poorPct;
+      canvas.drawArc(
+        Rect.fromCircle(center: center, radius: radius - strokeWidth/2),
+        startAngle,
+        sweepAngle,
+        false,
+        paintPoor,
+      );
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant CustomPainter oldDelegate) => true;
+}
+

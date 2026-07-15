@@ -48,8 +48,44 @@ active_alarm_name = ""
 alarm_fired_at = None
 scheduled_sleep_time = None
 scheduled_sleep_checked_today = False
+# Sleep state: persisted across app restarts via sleep_status.json
+is_sleeping = False          # True whenever ESP32 is in sleep mode (manual or PIR)
+sleep_status_file = "sleep_status.json"   # Persisted sleep state for app reopen
+# Sleep Window: auto-sleep is only allowed between these hours (prevents false-sleep when away)
+sleep_window_start = 22   # Hour (24h) when auto-sleep activates   — default 10 PM
+sleep_window_end   = 10   # Hour (24h) when auto-sleep deactivates — default 10 AM
 send_lock = threading.Lock()  # Prevents interleaved sends from multiple threads
 chat_lock = threading.Lock()  # Protects chat_session across threads
+
+
+def _load_sleep_status():
+    """Restore is_sleeping and sleep_start_time from disk on server restart."""
+    global is_sleeping
+    if os.path.exists(sleep_status_file):
+        try:
+            with open(sleep_status_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            is_sleeping = data.get("is_sleeping", False)
+        except Exception:
+            is_sleeping = False
+
+def _save_sleep_status(sleeping: bool, start_time=None):
+    """Persist sleep state so the Android app can query it after reopen."""
+    global is_sleeping
+    is_sleeping = sleeping
+    payload = {
+        "is_sleeping": sleeping,
+        "start_time": start_time,
+        "updated_at": datetime.datetime.now().isoformat()
+    }
+    try:
+        with open(sleep_status_file, "w", encoding="utf-8") as f:
+            json.dump(payload, f)
+    except Exception as e:
+        print(f"[Sleep Status] Failed to persist status: {e}")
+
+# Load persisted sleep state on startup
+_load_sleep_status()
 
 # --- LLM SYSTEM INSTRUCTION FOR AGENTIC COMMANDS ---
 SYSTEM_INSTRUCTION = """You are a helpful and cute desk assistant built into a tiny microcontroller. 
@@ -537,6 +573,11 @@ def clear_reminders():
 
 def delete_reminder_by_index(index):
     with db_lock:
+        try:
+            index = int(index)
+        except (ValueError, TypeError):
+            print(f"[API Reminder] Failed to cast index {index} to integer.")
+            return None
         reminders = _load_reminders_internal()
         active_reminders = [r for r in reminders if not r.get("fired", False)]
         if 1 <= index <= len(active_reminders):
@@ -545,6 +586,7 @@ def delete_reminder_by_index(index):
             _save_reminders_internal(reminders)
             return target.get("task", "Reminder")
         return None
+
 
 def get_weather():
     try:
@@ -1187,6 +1229,7 @@ class VoiceAgentHandler:
                         self.last_pir_state = 'AWAKE'
                         print("[PIR] Device woke up fully.")
                         log_sleep_event("WAKE")
+                        _save_sleep_status(False)  # Persist wake state
                         # End Sleep Monitoring Session and save to JSON
                         self.end_sleep_session()
                         self.recv_buffer = bytearray(after)
@@ -1210,6 +1253,8 @@ class VoiceAgentHandler:
                                 self.sleep_movement_count = 0
                                 self.sleep_noise_levels = []
                                 self.sleep_noise_events = 0
+                                self.sleep_ldr_levels = []
+                                _save_sleep_status(True, self.sleep_start_time)  # Persist sleep state
                                 print(f"[Sleep Monitor] Session started at {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
                         self.recv_buffer = bytearray(after)
                         processing = True
@@ -1693,6 +1738,26 @@ class CompanionRestHandler(BaseHTTPRequestHandler):
             global scheduled_sleep_time
             self.wfile.write(json.dumps({"scheduled_time": scheduled_sleep_time or ""}).encode('utf-8'))
 
+        elif self.path == '/api/sleep/status':
+            # Returns current sleep state + the start time if sleeping
+            self._set_headers(200)
+            payload = {"is_sleeping": False, "start_time": None}
+            if os.path.exists(sleep_status_file):
+                try:
+                    with open(sleep_status_file, "r", encoding="utf-8") as f:
+                        payload = json.load(f)
+                except Exception:
+                    pass
+            self.wfile.write(json.dumps(payload).encode('utf-8'))
+
+        elif self.path == '/api/sleep/window':
+            # Returns the current configured sleep window
+            self._set_headers(200)
+            self.wfile.write(json.dumps({
+                "start_hour": sleep_window_start,
+                "end_hour": sleep_window_end
+            }).encode('utf-8'))
+
         elif self.path == '/api/sleep':
             self._set_headers(200)
             sessions = []
@@ -1706,6 +1771,8 @@ class CompanionRestHandler(BaseHTTPRequestHandler):
         else:
             self._set_headers(404)
             self.wfile.write(json.dumps({"error": "Not Found"}).encode('utf-8'))
+
+
 
     def do_POST(self):
         global active_conn, active_handler, chat_session, scheduled_sleep_time
@@ -1919,12 +1986,14 @@ class CompanionRestHandler(BaseHTTPRequestHandler):
             sleep_type = data.get("type", "sleep")
             print(f"[REST Sleep] Force sleep trigger from app: {sleep_type}")
             if active_handler:
-                active_handler.sleep_start_time = time.time()
+                start_ts = time.time()
+                active_handler.sleep_start_time = start_ts
                 active_handler.sleep_movement_count = 0
                 active_handler.sleep_noise_levels = []
                 active_handler.sleep_noise_events = 0
                 active_handler.sleep_ldr_levels = []
                 active_handler.last_pir_state = 'SLEEPING'
+                _save_sleep_status(True, start_ts)  # Persist so app can reopen in sleep mode
                 try:
                     active_conn.sendall(b"CMD:START_SLEEP\n")
                 except Exception:
@@ -1935,15 +2004,93 @@ class CompanionRestHandler(BaseHTTPRequestHandler):
                 self._set_headers(400)
                 self.wfile.write(json.dumps({"error": "ESP32 desk clock is not connected to the server right now."}).encode('utf-8'))
 
+        elif self.path == '/api/sleep/wake':
+            # Manual wake-up triggered from Android app
+            print("[REST Sleep] Manual wake-up triggered from app.")
+            if active_handler:
+                active_handler.last_pir_state = 'AWAKE'
+                log_sleep_event("WAKE")
+                _save_sleep_status(False)  # Mark as awake
+                # End the sleep session and return the session summary inline
+                session_data = None
+                if hasattr(active_handler, 'sleep_start_time') and active_handler.sleep_start_time is not None:
+                    # Compute summary before calling end_sleep_session (which clears it)
+                    end_time = time.time()
+                    duration = end_time - active_handler.sleep_start_time
+                    duration_hours = duration / 3600.0
+                    session_type = "actual_sleep" if duration_hours >= 3.0 else "nap"
+                    if duration >= 600.0:  # Only if >= 10 minutes
+                        avg_noise = float(np.mean(active_handler.sleep_noise_levels)) if active_handler.sleep_noise_levels else 0.0
+                        max_noise = float(np.max(active_handler.sleep_noise_levels)) if active_handler.sleep_noise_levels else 0.0
+                        avg_ldr = float(np.mean(active_handler.sleep_ldr_levels)) if hasattr(active_handler, 'sleep_ldr_levels') and active_handler.sleep_ldr_levels else 150.0
+                        movements_per_hour = active_handler.sleep_movement_count / max(duration_hours, 0.01)
+                        if movements_per_hour <= 2.0 and avg_noise <= 300.0 and avg_ldr <= 500.0:
+                            quality = "Good"
+                        elif movements_per_hour > 5.0 or avg_noise > 600.0 or avg_ldr > 1200.0:
+                            quality = "Poor"
+                        else:
+                            quality = "Fair"
+                        session_data = {
+                            "type": session_type,
+                            "duration_hours": round(duration_hours, 2),
+                            "movement_count": active_handler.sleep_movement_count,
+                            "quality": quality,
+                            "average_noise": round(avg_noise, 1),
+                            "average_ldr": round(avg_ldr, 1),
+                        }
+                active_handler.end_sleep_session()
+                # Tell the ESP32 to wake up and show summary screen
+                try:
+                    active_conn.sendall(b"CMD:FORCE_WAKE\n")
+                except Exception:
+                    pass
+                self._set_headers(200)
+                self.wfile.write(json.dumps({"status": "SUCCESS", "session": session_data}).encode('utf-8'))
+            else:
+                # No active handler but we should still clear the persisted sleeping flag
+                _save_sleep_status(False)
+                self._set_headers(200)
+                self.wfile.write(json.dumps({"status": "SUCCESS", "session": None}).encode('utf-8'))
+
         elif self.path == '/api/sleep/schedule':
             time_val = data.get("time", "") # HH:MM
             scheduled_sleep_time = time_val
             print(f"[REST Sleep] Configured target bedtime to: {scheduled_sleep_time}")
             self._set_headers(200)
             self.wfile.write(json.dumps({"status": "SUCCESS", "scheduled_time": scheduled_sleep_time}).encode('utf-8'))
+
+        elif self.path == '/api/sleep/window':
+            # Update the sleep window — hours when auto-sleep detection is active
+            global sleep_window_start, sleep_window_end
+            start = data.get("start_hour", 22)
+            end   = data.get("end_hour", 10)
+            try:
+                start = int(start)
+                end   = int(end)
+                if 0 <= start <= 23 and 0 <= end <= 23:
+                    sleep_window_start = start
+                    sleep_window_end   = end
+                    print(f"[REST Sleep] Sleep window updated: {start:02d}:00 → {end:02d}:00")
+                    # Push the new window to the ESP32 immediately if connected
+                    if active_conn:
+                        try:
+                            active_conn.sendall(f"SLEEP_WINDOW:{start}:{end}\n".encode())
+                        except Exception:
+                            pass
+                    self._set_headers(200)
+                    self.wfile.write(json.dumps({"status": "SUCCESS", "start_hour": start, "end_hour": end}).encode('utf-8'))
+                else:
+                    self._set_headers(400)
+                    self.wfile.write(json.dumps({"error": "Hours must be 0-23"}).encode('utf-8'))
+            except ValueError:
+                self._set_headers(400)
+                self.wfile.write(json.dumps({"error": "Invalid hour values"}).encode('utf-8'))
+
         else:
             self._set_headers(404)
             self.wfile.write(json.dumps({"error": "Not Found"}).encode('utf-8'))
+
+
 
 def run_rest_server():
     server_address = ('', 8888)

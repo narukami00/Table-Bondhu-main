@@ -1,53 +1,41 @@
-# Codebase Concerns
+# Table-Bondhu Technical Concerns & Limitations (`CONCERNS.md`)
 
-## Core Sections (Required)
+This document records the identified tech debt, hardware limitations, edge-case vulnerabilities, and performance bottlenecks in the Table-Bondhu project.
 
-### 1) Top Risks (Prioritized)
+---
 
-| Severity | Concern | Evidence | Impact | Suggested action |
-|----------|---------|----------|--------|------------------|
-| High | Plaintext WiFi Credentials committed to repo | [config.h](file:///F:/__KUET%20CSE22/Assignments/IOT/Table-Bondhu-main/gemini_LLM_btn/config.h) | Exposure of private network credentials | Move credentials out of the sketch file into an offline config or local AP portal |
-| High | Hardcoded model paths | [agentic_companion.py](file:///F:/__KUET%20CSE22/Assignments/IOT/Table-Bondhu-main/agentic_companion.py#L129) | Model loading breaks on any machine except the developer's laptop | Load paths dynamically using environment variables (`.env`) |
-| Medium | Single connection limit | [agentic_companion.py](file:///F:/__KUET%20CSE22/Assignments/IOT/Table-Bondhu-main/agentic_companion.py#L568) | Multiple client connections will overwrite the active socket reference, dropping existing clients | Refactor connection routing to handle multiple connection descriptors concurrently |
+## 1. Hardware Power & Voltage Concerns
 
-### 2) Technical Debt
+*   **ESP32 Power Rail Sagging:**
+    *   *The Concern:* The ESP32 Dev Module uses a small onboard linear regulator (such as the AMS1117) to drop 5V USB input down to 3.3V.
+    *   *The Risk:* When the ESP32 Wi-Fi module operates (drawing up to 250mA peak) while the TFT screen backlight, active buzzer, and PIR sensor are active, the total current draw can exceed the regulator's limit. This causes the 3.3V power rail to sag, which can lead to random resets, garbled microphone audio, or screen flicker.
+    *   *Recommendation:* Use a high-quality USB power source supplying at least 1.5A. Connect a $100\mu\text{F}$ decoupling capacitor across the ESP32's 3.3V and GND pins to smooth out transient current spikes.
 
-| Debt item | Why it exists | Where | Risk if ignored | Suggested fix |
-|-----------|---------------|-------|-----------------|---------------|
-| Single-file monolithic server | Rapid initial prototyping | [agentic_companion.py](file:///F:/__KUET%20CSE22/Assignments/IOT/Table-Bondhu-main/agentic_companion.py) | High complexity, difficult to maintain, easy to introduce regression bugs | Break into modules: TCP Server, Audio Pipeline, Agent Handler, Reminder Store |
-| Single-file monolithic firmware | Rapid initial prototyping | [gemini_LLM_btn.ino](file:///F:/__KUET%20CSE22/Assignments/IOT/Table-Bondhu-main/gemini_LLM_btn/gemini_LLM_btn.ino) | Hard to manage state machines, high chances of stack overflow/RAM limits | Modularize sketches into separate utility headers (.h) and source files (.cpp) |
-| LDR theme-switching audio gap | Shared hardware ADC channels on ESP32 | [gemini_LLM_btn.ino](file:///F:/__KUET%20CSE22/Assignments/IOT/Table-Bondhu-main/gemini_LLM_btn/gemini_LLM_btn.ino#L649-L653) | Brief audio streaming drops every 1.5 seconds | Implement non-blocking asynchronous reading or shift LDR to a separate ADC controller |
-| Standby connection timeout | Server socket times out in 30s when client stops audio stream | [agentic_companion.py](file:///F:/__KUET%20CSE22/Assignments/IOT/Table-Bondhu-main/agentic_companion.py#L919) and [gemini_LLM_btn.ino](file:///F:/__KUET%20CSE22/Assignments/IOT/Table-Bondhu-main/gemini_LLM_btn/gemini_LLM_btn.ino#L1349) | Client disconnects and reconnects repeatedly during sleep | Mitigated: Client sends periodic heartbeat (`PIR:SLEEP`) every 15s to keep socket alive |
+---
 
-### 3) Security Concerns
+## 2. API & Network Dependencies
 
-| Risk | OWASP category (if applicable) | Evidence | Current mitigation | Gap |
-|------|--------------------------------|----------|--------------------|-----|
-| Plaintext credentials in code | A02:2021-Cryptographic Failures | [config.h](file:///F:/__KUET%20CSE22/Assignments/IOT/Table-Bondhu-main/gemini_LLM_btn/config.h) | None | Credentials committed to repository |
-| No API validation or auth | A01:2021-Broken Access Control | [agentic_companion.py](file:///F:/__KUET%20CSE22/Assignments/IOT/Table-Bondhu-main/agentic_companion.py#L886) | None | Unauthenticated client can trigger alarms, update reminders, or flood the LLM |
+*   **Hardcoded Coordinates for Weather Forecasts:**
+    *   *The Concern:* The Open-Meteo weather endpoint in `agentic_companion.py` uses hardcoded latitude and longitude coordinates for Khulna, Bangladesh (`latitude=22.8956&longitude=89.5011`).
+    *   *The Risk:* If the device is moved to another city, the clock will continue to display weather data for Khulna.
+    *   *Recommendation:* [ASK USER] Add IP-based geolocation lookup on the server to set coordinates dynamically on startup.
+*   **LM Studio Connection Timeout:**
+    *   *The Concern:* The OpenAI REST client in `agentic_companion.py` uses default timeout parameters when sending prompt queries to LM Studio.
+    *   *The Risk:* If the laptop is running on battery power or performing heavy calculations, local LLM generation can stall. If generation takes longer than 10 seconds, the connection will drop, leaving the client stuck in `STATE_THINKING` until the socket is reset.
+    *   *Recommendation:* Add a 30-second timeout limit to LLM completions.
 
-### 4) Performance and Scaling Concerns
+---
 
-| Concern | Evidence | Current symptom | Scaling risk | Suggested improvement |
-|---------|----------|-----------------|-------------|-----------------------|
-| Linear audio resampling | [agentic_companion.py](file:///F:/__KUET%20CSE22/Assignments/IOT/Table-Bondhu-main/agentic_companion.py#L225) | Audible aliasing artifacts | Speech transcription accuracy degrades | Employ higher-quality interpolation/resampling library |
-| Sequential LLM processing | [agentic_companion.py](file:///F:/__KUET%20CSE22/Assignments/IOT/Table-Bondhu-main/agentic_companion.py#L1194) | UI blocks during inference | Slow response times | Run chat inference asynchronously |
+## 3. Storage & Index Constraints
 
-### 5) Fragile/High-Churn Areas
+*   **List Index Deletion Vulnerability:**
+    *   *The Concern:* The reminder deletion route `/api/reminders/delete` accepts a simple 1-based integer index corresponding to the active reminders list.
+    *   *The Risk:* If the list of active reminders changes (e.g. a reminder triggers and is automatically deleted) between the time the user opens the app and the time they tap delete, the indices will shift. This can result in deleting the wrong reminder.
+    *   *Recommendation:* Generate and use a unique ID (UUID) for each reminder, rather than relying on its index in the list.
 
-| Area | Why fragile | Churn signal | Safe change strategy |
-|------|-------------|-------------|----------------------|
-| `gemini_LLM_btn.ino` | Manages multiple async states (I2S DMA, display, button edge, PIR, timer) | 17 commits in 90 days | Build comprehensive unit mocks for sensors before updating |
-| `agentic_companion.py` | Handles binary framing, speech buffer, audio fallback, LLM completions | 15 commits in 90 days | Use automated diagnostic scripts to test packet parsing |
+---
 
-### 6) `[ASK USER]` Questions
-
-1. [ASK USER] Should we secure raw TCP communication using TLS?
-2. [ASK USER] Is there a preference for replacing `winsound` with `pyaudio` or `sounddevice` for cross-platform compatibility?
-3. [ASK USER] Should we pin dependencies in `requirements.txt`?
-
-### 7) Evidence
-
-- [docs/codebase/.codebase-scan.txt](file:///F:/__KUET%20CSE22/Assignments/IOT/Table-Bondhu-main/docs/codebase/.codebase-scan.txt)
-- [agentic_companion.py](file:///F:/__KUET%20CSE22/Assignments/IOT/Table-Bondhu-main/agentic_companion.py)
-- [gemini_LLM_btn/gemini_LLM_btn.ino](file:///F:/__KUET%20CSE22/Assignments/IOT/Table-Bondhu-main/gemini_LLM_btn/gemini_LLM_btn.ino)
+## 4. Evidence Paths
+*   Open-Meteo coordinates parameter: [agentic_companion.py#L588](file:///F:/__KUET%20Assignments/IOT/Table-Bondhu-main/agentic_companion.py#L588)
+*   Index-based deletion handling: [agentic_companion.py#L1937](file:///F:/__KUET%20Assignments/IOT/Table-Bondhu-main/agentic_companion.py#L1937)
+*   Reminder model structure: [reminders.json](file:///F:/__KUET%20Assignments/IOT/Table-Bondhu-main/reminders.json)
