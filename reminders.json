@@ -3,7 +3,7 @@
     "task": "study database",
     "trigger_time": "2026-07-10T16:12:00.997646",
     "display_time": "in 30 minutes",
-    "fired": false,
+    "fired": true,
     "created": "2026-07-10T15:42:00.998196"
   },
   {
@@ -19,5 +19,33 @@
     "display_time": "12:00 PM",
     "fired": true,
     "created": "2026-07-10T15:52:12.385701"
+  },
+  {
+    "task": "watch football",
+    "trigger_time": "2026-07-16T03:12:21.073723",
+    "display_time": "in 2 hours",
+    "fired": true,
+    "created": "2026-07-16T01:12:21.074276"
+  },
+  {
+    "task": "Alarm",
+    "trigger_time": "2026-07-17T09:35:17.652973",
+    "display_time": "in 20 hours",
+    "fired": false,
+    "created": "2026-07-16T13:35:17.653474"
+  },
+  {
+    "task": "dinner",
+    "trigger_time": "2026-07-16T17:00:00",
+    "display_time": "5:00 PM",
+    "fired": false,
+    "created": "2026-07-16T13:40:45.531956"
+  },
+  {
+    "task": "walk",
+    "trigger_time": "2026-07-16T21:00:00",
+    "display_time": "9:00 PM",
+    "fired": false,
+    "created": "2026-07-16T13:41:00.674338"
   }
 ]

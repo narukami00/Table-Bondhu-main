@@ -10,7 +10,8 @@ Below is the directory tree containing the source files and configurations of th
 
 ```
 Table-Bondhu-main/
-├── agentic_companion.py           # Primary Python Server entry point
+├── agentic_companion.py           # Primary Python Server entry point (PC/Laptop)
+├── agentic_companion_raspberrypi_4.py # Optimized Python Server entry point (Pi 4 CPU/RAM)
 ├── check_api.py                   # Diagnostic script to test LM Studio connection
 ├── requirements.txt               # Server-side Python dependency list
 ├── reminders.json                 # Persistent database for reminders and alarms
@@ -39,13 +40,14 @@ Table-Bondhu-main/
 
 ## 2. Key Code Entry Points Tracing
 
-### A. Python Server Core: `agentic_companion.py`
-*   **Startup Sequence:** The script starts by reading the `.env` file, initializing the ONNX ASR model, VITS TTS engine, and socket connections.
+### A. Python Server Core: `agentic_companion.py` (PC) & `agentic_companion_raspberrypi_4.py` (Pi 4)
+*   **Startup Sequence:** The script starts by reading the `.env` file, initializing the speech/ASR engine (`onnx-asr` on PC; `faster_whisper` on Pi 4), loading the local VITS Piper voice model, and booting socket interfaces.
 *   **Secondary Threads:**
     *   **TCP Listener Thread:** Starts on port `8080` to accept client connections and handle raw audio byte streaming.
     *   **REST HTTP Server Thread:** Starts on port `8888` to listen for HTTP REST API requests.
     *   **Alarm Scheduler Thread:** Runs a loop that checks `reminders.json` once a second to trigger alarms.
     *   **UDP Beacon Thread:** Broadcasts UDP packets on port `9999` to announce the server's IP address.
+    *   **ASR Processing Thread:** Handles speech translations locally on standard CPU threads.
 
 ### B. ESP32 Client Core: `gemini_LLM_btn/gemini_LLM_btn.ino`
 *   **`setup()` Routine:** Initializes the serial monitor, enables internal pull-ups for physical buttons, sets the buzzer pin as digital output, configures the LDR and PIR inputs, initializes the TFT display, and attempts to connect to Wi-Fi.

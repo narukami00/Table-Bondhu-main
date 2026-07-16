@@ -55,6 +55,7 @@ To keep the documentation organized, detailed technical details are separated in
 5.  **Reminder persistence & Countdown timer engine ([ALARM_TIMER_SYSTEM.md](file:///F:/__KUET%20Assignments/IOT/Table-Bondhu-main/docs/codebase/ALARM_TIMER_SYSTEM.md)):** Thread-safety file locks (`db_lock`), natural time parsing, relative time math, and local countdown timer states.
 6.  **Sleep state logic & Pre-Wake check ([SLEEP_SYSTEM.md](file:///F:/__KUET%20Assignments/IOT/Table-Bondhu-main/docs/codebase/SLEEP_SYSTEM.md)):** NTP clock gating, PIR history arrays, room RMS noise monitoring, pre-wake wave verification, and quality categorization rules.
 7.  **Flutter Companion App ([ANDROID_APP.md](file:///F:/__KUET%20Assignments/IOT/Table-Bondhu-main/docs/codebase/ANDROID_APP.md)):** Wi-Fi setup bridges, discovery caching, low-latency push-to-talk recorders, persistent night overlays, and custom vector charting.
+8.  **Raspberry Pi 4 optimizations ([RASPBERRY_PI.md](file:///F:/__KUET%20Assignments/IOT/Table-Bondhu-main/docs/codebase/RASPBERRY_PI.md)):** Quantized local ASR/TTS/LLM models, CPU thread distributions, parameter restrictions, and Pipewire setups.
 
 ---
 

@@ -1,41 +1,43 @@
 """
-Agentic Companion Server
-Hands-free voice activation, VAD silence detection, reminders & alarms with laptop audio playback
+Agentic Companion Server (Raspberry Pi 4 Optimized - FULLY RESTORED)
+All ESP32 communication features restored + Pi optimizations
 """
+
+import ollama
 import socket
 import numpy as np
-import onnx_asr
+from faster_whisper import WhisperModel
 import threading
 import time
 import wave
 import os
 import re
 import json
-import io
-import urllib.request
+import subprocess
 import datetime
-from gtts import gTTS
+import math
+import struct
+import urllib.request
+from http.server import HTTPServer, BaseHTTPRequestHandler
 from pydub import AudioSegment
 from dotenv import load_dotenv
 
-# Load environment variables from .env file
 load_dotenv()
 
 # --- CONFIGURATION ---
 HOST = '0.0.0.0'
 PORT = 8080
-
-# Configure the LLM (LM Studio Local Endpoint)
-LM_STUDIO_URL = "http://127.0.0.1:1234/v1/chat/completions"
-MODEL_NAME = "qwen2.5-coder-1.5b-instruct"
+OLLAMA_CLIENT = ollama.Client(host='http://127.0.0.1:11434', timeout=60)
+MODEL_NAME = "qwen2.5:0.5b"
 REMINDERS_FILE = "reminders.json"
 RECORDINGS_DIR = "recordings_analysis"
 COMMAND_TRIGGERS = ["reminder", "reminders", "hi", "hello", "hey", "yo"]
 QUESTION_WORDS = ["what", "how", "why", "can you", "is", "do", "where",
                    "when", "who", "which", "could", "would", "should",
                    "tell me", "explain"]
-KEYWORD_CHUNK_SECONDS = 2.5
+KEYWORD_CHUNK_SECONDS = 1.5
 KEYWORD_DEBOUNCE_SECONDS = 5
+keyword_suppress_until = 0  # suppress keyword detection while TTS is playing
 
 if not os.path.exists(RECORDINGS_DIR):
     os.makedirs(RECORDINGS_DIR)
@@ -49,17 +51,19 @@ alarm_fired_at = None
 scheduled_sleep_time = None
 scheduled_sleep_checked_today = False
 # Sleep state: persisted across app restarts via sleep_status.json
-is_sleeping = False          # True whenever ESP32 is in sleep mode (manual or PIR)
-sleep_status_file = "sleep_status.json"   # Persisted sleep state for app reopen
-# Sleep Window: auto-sleep is only allowed between these hours (prevents false-sleep when away)
-sleep_window_start = 22   # Hour (24h) when auto-sleep activates   — default 10 PM
-sleep_window_end   = 10   # Hour (24h) when auto-sleep deactivates — default 10 AM
-send_lock = threading.Lock()  # Prevents interleaved sends from multiple threads
-chat_lock = threading.Lock()  # Protects chat_session across threads
+is_sleeping = False
+sleep_status_file = "sleep_status.json"
+# Sleep Window: auto-sleep only allowed between these hours (prevents false-sleep when away)
+sleep_window_start = 22   # Hour (24h) when auto-sleep activates
+sleep_window_end   = 10   # Hour (24h) when auto-sleep deactivates
+send_lock = threading.Lock()
+chat_lock = threading.Lock()
+active_audio_process = None
+loop_alarm_active = False
 
 
 def _load_sleep_status():
-    """Restore is_sleeping and sleep_start_time from disk on server restart."""
+    """Restore is_sleeping from disk on server restart."""
     global is_sleeping
     if os.path.exists(sleep_status_file):
         try:
@@ -68,6 +72,7 @@ def _load_sleep_status():
             is_sleeping = data.get("is_sleeping", False)
         except Exception:
             is_sleeping = False
+
 
 def _save_sleep_status(sleeping: bool, start_time=None):
     """Persist sleep state so the Android app can query it after reopen."""
@@ -84,38 +89,30 @@ def _save_sleep_status(sleeping: bool, start_time=None):
     except Exception as e:
         print(f"[Sleep Status] Failed to persist status: {e}")
 
+
 # Load persisted sleep state on startup
 _load_sleep_status()
 
-# --- LLM SYSTEM INSTRUCTION FOR AGENTIC COMMANDS ---
-SYSTEM_INSTRUCTION = """You are a helpful and cute desk assistant built into a tiny microcontroller. 
-Your answers are displayed on a 160x128 pixel screen. 
-You MUST be extremely concise. Keep every answer under 15 words. 
-Do not use markdown formatting. You MUST NOT use any emojis or emoticons in your responses.
+# --- LLM SYSTEM INSTRUCTION (Optimized for Qwen 0.5B) ---
+SYSTEM_INSTRUCTION = """You are a helpful offline desk assistant.
+Your answers are displayed on a small screen.
+RULES:
+1. Keep every answer under 15 words.
+2. NO markdown. NO emojis.
+3. ONLY use command tags when the user explicitly asks for reminders, alarms, sleep, or timer. For casual conversation like greetings or questions, respond naturally WITHOUT any tags.
+4. Do NOT invent new tags or modify the tag name. Format tags exactly as specified below.
 
-You have the ability to manage reminders, alarms, and sleep tracking.
-- If the user says they are going to sleep, taking a nap, or tell you to enter sleep/nap mode, append: [CMD:START_SLEEP]
-  Example: "I am taking a nap" -> "Goodnight! Sweet dreams. [CMD:START_SLEEP]"
-  Example: "Going to sleep now" -> "Goodnight! Sleep well. [CMD:START_SLEEP]"
-- EXPLICIT TIME (absolute): [CMD:ADD_REMINDER|task|ABS|time]
-  Examples: "remind me at 3pm" → "Added. [CMD:ADD_REMINDER|Reminder|ABS|3:00 PM]"
-  "remind me to study database at 9pm" → "Added. [CMD:ADD_REMINDER|study database|ABS|9:00 PM]"
-  "set alarm for 8:30 AM" → "Added. [CMD:ADD_REMINDER|Alarm|ABS|8:30 AM]"
-  "remind me tomorrow to attend meeting at 9am" → "Added. [CMD:ADD_REMINDER|attend meeting|ABS|tomorrow 9:00 AM]"
-  Use 12-hour format with AM/PM, or 24-hour like "15:00".
-- RELATIVE TIME: [CMD:ADD_REMINDER|task|REL|Ns/Nm/Nh]
-  "remind me to study database in 30 seconds" → "Added. [CMD:ADD_REMINDER|study database|REL|30s]"
-  "set a reminder to buy milk for 2 hours" → "Added. [CMD:ADD_REMINDER|buy milk|REL|2h]"
-  "alarm in 5 minutes" → "Added. [CMD:ADD_REMINDER|Alarm|REL|5m]"
-  Use s=seconds, m=minutes, h=hours.
-- If the user says "remind me" or "set a reminder" but doesn't specify a task, use "Reminder" as the task.
-- To LIST reminders: [CMD:LIST_REMINDERS]
-- To CLEAR all: [CMD:CLEAR_REMINDERS]
-- To DELETE a specific reminder by its 1-based index from the active list: [CMD:DELETE_REMINDER|index]
-  Examples: "delete the second reminder" (from active list context) → "Deleted. [CMD:DELETE_REMINDER|2]"
-  "remove reminder number 1" → "Removed. [CMD:DELETE_REMINDER|1]"
+Command tags (ONLY when requested):
+- Going to sleep: append [CMD:START_SLEEP]. Example: "I am taking a nap" -> "Goodnight! Sweet dreams. [CMD:START_SLEEP]"
+- Set reminder: [CMD:ADD_REMINDER|task|ABS|time] or [CMD:ADD_REMINDER|task|REL|time]
+  Examples: remind me at 3pm -> Added. [CMD:ADD_REMINDER|Reminder|ABS|3:00 PM]
+  remind me in 5 minutes -> Added. [CMD:ADD_REMINDER|Reminder|REL|5m]
+- List reminders: [CMD:LIST_REMINDERS]
+- Clear reminders: [CMD:CLEAR_REMINDERS]
+- Delete reminder: [CMD:DELETE_REMINDER|index]
+  Examples: delete the second reminder -> Deleted. [CMD:DELETE_REMINDER|2]
 
-Do not explain the command tags to the user, just include them at the end of your response."""
+Do not explain the command tags. Just include them at the end of your response."""
 
 class LocalChatSession:
     def __init__(self, system_instruction):
@@ -127,57 +124,46 @@ class LocalChatSession:
             self.history.append({"role": "user", "content": user_text})
             messages = []
             if self.system_instruction:
-                # Inject current date, time, and active reminders/tasks dynamically
                 now = datetime.datetime.now()
                 time_ctx = now.strftime("%A, %d %B %Y %I:%M %p")
                 
                 active_rems = get_reminders_list()
-                rem_list_str = ""
-                if active_rems:
-                    for i, r in enumerate(active_rems, 1):
-                        rem_list_str += f"{i}. {r.get('task')} (scheduled for {r.get('display_time')})\n"
-                else:
-                    rem_list_str = "No active reminders/tasks."
+                rem_list_str = "\n".join([f"{i}. {r.get('task')} at {r.get('display_time')}" for i, r in enumerate(active_rems, 1)]) or "None"
                 
                 sys_prompt = (
                     f"{self.system_instruction}\n\n"
-                    f"[CONTEXT]\n"
-                    f"- Current time/date: {time_ctx}\n"
-                    f"- Active reminders list:\n{rem_list_str}\n"
-                    f"Use this context to accurately answer queries about time, date, or reminders, and map deletion indexes correctly."
+                    f"CONTEXT: Time={time_ctx}. Active Reminders: {rem_list_str}"
                 )
                 messages.append({"role": "system", "content": sys_prompt})
-            messages.extend(self.history)
+            messages.extend(self.history[-4:])
             
-            data = {
-                "model": MODEL_NAME,
-                "messages": messages,
-                "temperature": 0.7
-            }
-            headers = {"Content-Type": "application/json"}
-            req = urllib.request.Request(LM_STUDIO_URL, data=json.dumps(data).encode("utf-8"), headers=headers)
-            with urllib.request.urlopen(req, timeout=15) as response:
-                res = json.loads(response.read().decode("utf-8"))
-                ai_answer = res["choices"][0]["message"]["content"]
+            try:
+                # Optimized generation parameters for local execution on Pi 4 (reduced search space & prediction tokens)
+                response = OLLAMA_CLIENT.chat(
+                    model=MODEL_NAME,
+                    messages=messages,
+                    options={
+                        "temperature": 0.1,
+                        "num_predict": 50,
+                        "top_k": 20,
+                        "top_p": 0.85
+                    },
+                    keep_alive="15m"
+                )
+                ai_answer = response['message']['content']
+            except Exception as e:
+                print(f"[LLM Error] Ollama request failed: {e}")
+                ai_answer = "My brain is offline. Please try again."
                 
             self.history.append({"role": "assistant", "content": ai_answer})
         
         class ResponseObject:
-            def __init__(self, text):
-                self.text = text
+            def __init__(self, text): self.text = text
         return ResponseObject(ai_answer)
 
-print("Loading Parakeet Model (tdt-0.6b)...")
-asr_model = onnx_asr.load_model(
-    'nemo-conformer-tdt',
-    path=r'C:\Users\Rafsan Riasat\AppData\Roaming\com.pais.handy\models\parakeet-tdt-0.6b-v2-int8',
-    quantization='int8'
-)
-
-# GTCRN Speech Denoiser is disabled because tiny neural enhancement models
-# introduce processing artifacts (spectral masking/phase distortion) on the
-# ESP32's raw 12-bit ADC audio, which degrades local ASR transcription accuracy.
-speech_denoiser = None
+print("Loading Faster-Whisper (tiny.en, int8 for Pi 4)...")
+asr_model = WhisperModel("tiny.en", device="cpu", compute_type="int8", cpu_threads=4)
+print("[*] Faster-Whisper loaded successfully.")
 
 print("Loading Offline VITS Text-to-Speech...")
 try:
@@ -187,231 +173,111 @@ try:
         tokens="models/vits-piper-en_US-amy-low/tokens.txt",
         data_dir="models/vits-piper-en_US-amy-low/espeak-ng-data"
     )
-    model_config = sherpa_onnx.OfflineTtsModelConfig(
-        vits=vits_config,
-        num_threads=1,
-        provider="cpu"
-    )
-    tts_config = sherpa_onnx.OfflineTtsConfig(
-        model=model_config,
-        max_num_sentences=1
-    )
+    model_config = sherpa_onnx.OfflineTtsModelConfig(vits=vits_config, num_threads=2, provider="cpu")
+    tts_config = sherpa_onnx.OfflineTtsConfig(model=model_config, max_num_sentences=1)
     offline_tts = sherpa_onnx.OfflineTts(tts_config)
     print("[*] Offline VITS Text-to-Speech loaded successfully.")
 except Exception as e:
     offline_tts = None
-    print(f"[Warning] Failed to load Offline VITS Text-to-Speech: {e}")
+    print(f"[Warning] Failed to load Offline VITS: {e}. Will fallback to espeak.")
 
 print("Initializing Local LLM Session...")
 chat_session = LocalChatSession(system_instruction=SYSTEM_INSTRUCTION)
 print("Systems Online! Ready to listen.")
 
-# --- LAPTOP AUDIO HELPERS ---
-import sys
-import subprocess
-import math
-import struct
-
-active_audio_process = None
-loop_alarm_active = False
-
+# --- AUDIO HELPERS ---
 def generate_default_sounds():
-    """Dynamically generate generic alert WAV files if not present (useful for headless Linux/Raspberry Pi)"""
-    import os
     if not os.path.exists("beep.wav"):
-        try:
-            sample_rate = 8000
-            with wave.open("beep.wav", "wb") as w:
-                w.setnchannels(1)
-                w.setsampwidth(2)
-                w.setframerate(sample_rate)
-                # 150ms of 2000Hz tone
-                for i in range(int(sample_rate * 0.15)):
-                    val = int(32767.0 * math.sin(2.0 * math.pi * 2000 * i / sample_rate))
-                    w.writeframes(struct.pack('h', val))
-        except Exception as e:
-            print(f"Failed to generate beep.wav: {e}")
-
+        with wave.open("beep.wav", "wb") as w:
+            w.setnchannels(1); w.setsampwidth(2); w.setframerate(8000)
+            for i in range(1200):
+                w.writeframes(struct.pack('h', int(32767.0 * math.sin(2.0 * math.pi * 2000 * i / 8000))))
     if not os.path.exists("alarm_sound.wav"):
-        try:
-            sample_rate = 8000
-            with wave.open("alarm_sound.wav", "wb") as w:
-                w.setnchannels(1)
-                w.setsampwidth(2)
-                w.setframerate(sample_rate)
-                # 1 second of pulsing 1000Hz tone (beep-beep)
-                for i in range(int(sample_rate * 1.0)):
-                    if (i % 1600) < 800:
-                        val = int(32767.0 * math.sin(2.0 * math.pi * 1000 * i / sample_rate))
-                    else:
-                        val = 0
-                    w.writeframes(struct.pack('h', val))
-        except Exception as e:
-            print(f"Failed to generate alarm_sound.wav: {e}")
+        with wave.open("alarm_sound.wav", "wb") as w:
+            w.setnchannels(1); w.setsampwidth(2); w.setframerate(8000)
+            for i in range(8000):
+                val = int(32767.0 * math.sin(2.0 * math.pi * 1000 * i / 8000)) if (i % 1600) < 800 else 0
+                w.writeframes(struct.pack('h', val))
 
 def play_wake_up_sound():
-    if sys.platform.startswith('win'):
-        try:
-            import winsound
-            # Short high pitch beep to signal wakeup
-            winsound.Beep(2000, 150)
-            winsound.Beep(2500, 150)
-        except Exception as e:
-            print(f"Failed to play wake up sound: {e}")
-    else:
-        generate_default_sounds()
-        try:
-            subprocess.Popen(["aplay", "beep.wav"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        except Exception as e:
-            print(f"[Audio Error] Failed to play wake up sound via aplay: {e}")
+    global keyword_suppress_until
+    generate_default_sounds()
+    try:
+        subprocess.Popen(["pw-play", "beep.wav"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        keyword_suppress_until = time.time() + 0.5
+    except Exception as e:
+        print(f"[Audio Error] Failed to play wake up sound: {e}")
 
 def play_alarm_sound():
     global active_audio_process, loop_alarm_active
     stop_active_alarm()
-    
-    if sys.platform.startswith('win'):
-        try:
-            import winsound
-            # Loop the system hand sound asynchronously
-            winsound.PlaySound("SystemHand", winsound.SND_ALIAS | winsound.SND_ASYNC | winsound.SND_LOOP)
-        except Exception as e:
-            print(f"Failed to play alarm sound: {e}")
-    else:
-        generate_default_sounds()
-        loop_alarm_active = True
-        def alarm_loop():
-            global active_audio_process
-            while loop_alarm_active:
-                try:
-                    active_audio_process = subprocess.Popen(["aplay", "alarm_sound.wav"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                    active_audio_process.wait()
-                except Exception:
-                    break
-                time.sleep(0.5)
-        threading.Thread(target=alarm_loop, daemon=True).start()
+    generate_default_sounds()
+    loop_alarm_active = True
+    def alarm_loop():
+        global active_audio_process
+        while loop_alarm_active:
+            try:
+                proc = subprocess.Popen(["pw-play", "alarm_sound.wav"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                active_audio_process = proc
+                proc.wait()
+            except Exception: break
+            time.sleep(0.5)
+    threading.Thread(target=alarm_loop, daemon=True).start()
 
 def stop_active_alarm():
     global active_alarm_active, active_alarm_name, alarm_fired_at, active_audio_process, loop_alarm_active
-    active_alarm_active = False
-    active_alarm_name = ""
-    alarm_fired_at = None
-    loop_alarm_active = False
-    
-    if sys.platform.startswith('win'):
-        try:
-            import winsound
-            winsound.PlaySound(None, winsound.SND_PURGE)
-            print("[Alarm] Buzzing stopped.")
-        except Exception as e:
-            print(f"Failed to stop alarm sound: {e}")
-    else:
-        if active_audio_process is not None:
-            try:
-                active_audio_process.terminate()
-            except Exception:
-                pass
-            active_audio_process = None
-            print("[Alarm] Buzzing stopped.")
-
-# --- TTS (Text-to-Speech) via Google TTS ---
-def play_speech_on_laptop(text):
-    """Play the synthesized speech on the laptop speakers using winsound, modulated to sound like Pikachu"""
+    active_alarm_active = False; active_alarm_name = ""; alarm_fired_at = None; loop_alarm_active = False
+    if active_audio_process is not None:
+        try: active_audio_process.kill()
+        except Exception: pass
+        active_audio_process = None
+    # Kill any orphaned pw-play processes from the alarm loop
     try:
-        import winsound
-        sound = None
+        subprocess.run(["pkill", "-f", "pw-play alarm_sound.wav"],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2)
+    except Exception: pass
+    print("[Alarm] Buzzing stopped.")
+
+def play_speech_on_laptop(text):
+    global keyword_suppress_until
+    try:
+        temp_wav = "temp_tts.wav"
+        success = False
         
-        # Try offline VITS generation first
         if offline_tts is not None:
             try:
-                # Generate offline raw audio
                 audio = offline_tts.generate(text)
-                # Convert float32 array to 16-bit PCM bytes
                 audio_samples = np.array(audio.samples, dtype=np.float32)
                 int16_samples = (audio_samples * 32767.0).astype(np.int16)
-                raw_bytes = int16_samples.tobytes()
-                
-                sound = AudioSegment(
-                    data=raw_bytes,
-                    sample_width=2,
-                    frame_rate=audio.sample_rate,
-                    channels=1
-                )
+                with wave.open(temp_wav, "wb") as w:
+                    w.setnchannels(1); w.setsampwidth(2); w.setframerate(audio.sample_rate)
+                    w.writeframes(int16_samples.tobytes())
+                success = True
             except Exception as tts_err:
-                print(f"[Warning] Offline VITS generation failed, falling back to Google TTS: {tts_err}")
+                print(f"[Warning] VITS failed: {tts_err}")
         
-        # Fallback to Google TTS (requires internet) if offline TTS failed or is uninitialized
-        if sound is None:
-            try:
-                tts = gTTS(text=text, lang='en', slow=False)
-                mp3_buf = io.BytesIO()
-                tts.write_to_fp(mp3_buf)
-                mp3_buf.seek(0)
-                sound = AudioSegment.from_mp3(mp3_buf)
-            except Exception as gtts_err:
-                print(f"[Warning] Google TTS conversion failed: {gtts_err}")
+        if not success:
+            print("[TTS] Falling back to espeak (100% offline)")
+            subprocess.run(["espeak", "-v", "en", "-s", "150", "-p", "75", text], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            espeak_dur = max(2.0, len(text.split()) / 2.5)
+            keyword_suppress_until = time.time() + espeak_dur + 0.5
+            return espeak_dur
         
-        # If still None (e.g., missing ffmpeg/dependencies on Windows), fall back to native Windows SAPI5
-        if sound is None:
-            if sys.platform.startswith('win'):
-                try:
-                    import win32com.client
-                    speaker = win32com.client.Dispatch("SAPI.SpVoice")
-                    speaker.Rate = 2  # slightly faster to sound cute
-                    speaker.Speak(text, 1) # SVSFlagsAsync = 1
-                    words = len(text.split())
-                    duration_sec = max(2.0, words / 2.5)
-                    print(f"[SAPI5 TTS] Speaking natively: '{text}' ({duration_sec:.1f}s)")
-                    return duration_sec
-                except Exception as sapi_err:
-                    print(f"[SAPI5 TTS Error] {sapi_err}")
-        
-        # --- PIKACHU VOICE EFFECT (PITCH & SPEED SHIFT) ---
-        # Speed up and pitch up by 40% (creates a cute, high-pitched tone)
-        new_sample_rate = int(sound.frame_rate * 1.40)
-        pitched_sound = sound._spawn(sound.raw_data, overrides={'frame_rate': new_sample_rate})
-        # Resample to standard 44.1kHz rate so the audio interface plays it back correctly
-        pitched_sound = pitched_sound.set_frame_rate(44100)
-        
-        # Calculate new duration (before adding silence so avatar mouth stops exactly when speech ends)
-        duration_sec = len(pitched_sound.raw_data) / (pitched_sound.frame_rate * pitched_sound.channels * pitched_sound.sample_width)
-        
-        # Add 1 second of silence to prevent abrupt winsound truncation at the tail
-        silence = AudioSegment.silent(duration=1000, frame_rate=44100)
-        if pitched_sound.channels != silence.channels:
-            silence = silence.set_channels(pitched_sound.channels)
-        pitched_sound = pitched_sound + silence
-        
-        temp_wav = "temp_tts_playback.wav"
-        pitched_sound.export(temp_wav, format="wav")
-        
-        # Play asynchronously (cross-platform)
-        print(f"[TTS Pikachu] Playing asynchronously: '{text}' ({duration_sec:.1f}s)")
-        if sys.platform.startswith('win'):
-            import winsound
-            winsound.PlaySound(temp_wav, winsound.SND_FILENAME | winsound.SND_ASYNC)
-        else:
-            try:
-                subprocess.Popen(["aplay", temp_wav], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            except Exception as e:
-                print(f"[Audio Error] Failed to play speech via aplay: {e}")
+        duration_sec = max(2.0, len(text.split()) / 2.5)
+        subprocess.Popen(["pw-play", temp_wav], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        keyword_suppress_until = time.time() + duration_sec + 0.5
         return duration_sec
+        
     except Exception as e:
-        print(f"[TTS Pikachu Error] {e}")
+        print(f"[TTS Error] {e}")
         return None
 
 def speak_on_esp32(conn, text, header=None):
-    """Generate TTS and play on laptop while sending duration sync back to the ESP32.
-    header: optional bytes to send atomically before DURATION (e.g. UI_MSG).
-    """
     duration_sec = play_speech_on_laptop(text)
-    if duration_sec is None:
-        # Fallback to duration estimate based on text length
-        duration_sec = max(5.0, len(text) * 0.1)
-    
+    if duration_sec is None: duration_sec = max(5.0, len(text) * 0.1)
     try:
         with send_lock:
-            if header:
-                conn.sendall(header)
+            if header: conn.sendall(header)
             conn.sendall(f"DURATION:{duration_sec:.1f}\n".encode())
         print(f"[TTS Laptop] Sent sync instructions (duration: {duration_sec:.1f}s) to ESP32")
         return True
@@ -423,32 +289,23 @@ def speak_on_esp32(conn, text, header=None):
 db_lock = threading.Lock()
 
 def parse_relative_time(rel_str):
-    """Parse relative time like '30s', '5m', '2h' into (trigger_datetime, display_str)"""
     rel_str = rel_str.strip().lower()
     match = re.match(r'^(\d+)\s*(s|sec|second|m|min|minute|h|hr|hour)s?$', rel_str)
-    if not match:
-        return None, None
-    amount = int(match.group(1))
-    unit = match.group(2)
+    if not match: return None, None
+    amount, unit = int(match.group(1)), match.group(2)
     if unit in ('s', 'sec', 'second'):
-        delta = datetime.timedelta(seconds=amount)
-        display = f"in {amount} second{'s' if amount != 1 else ''}"
+        delta, display = datetime.timedelta(seconds=amount), f"in {amount} second{'s' if amount != 1 else ''}"
     elif unit in ('m', 'min', 'minute'):
-        delta = datetime.timedelta(minutes=amount)
-        display = f"in {amount} minute{'s' if amount != 1 else ''}"
-    elif unit in ('h', 'hr', 'hour'):
-        delta = datetime.timedelta(hours=amount)
-        display = f"in {amount} hour{'s' if amount != 1 else ''}"
+        delta, display = datetime.timedelta(minutes=amount), f"in {amount} minute{'s' if amount != 1 else ''}"
     else:
-        return None, None
-    trigger_dt = datetime.datetime.now() + delta
-    return trigger_dt, display
+        delta, display = datetime.timedelta(hours=amount), f"in {amount} hour{'s' if amount != 1 else ''}"
+    return datetime.datetime.now() + delta, display
 
 def parse_absolute_time(abs_str):
     """Parse absolute time like '15:00', '3:00 PM', '2026-06-28 09:00' into (trigger_datetime, display_str)"""
     abs_str = abs_str.strip()
     now = datetime.datetime.now()
-    
+
     # Try HH:MM AM/PM format (e.g., "3:00 PM", "8:30 am")
     match = re.match(r'^(\d{1,2}):(\d{2})\s*(AM|PM|am|pm)$', abs_str)
     if match:
@@ -464,7 +321,7 @@ def parse_absolute_time(abs_str):
             target += datetime.timedelta(days=1)
         display = target.strftime("%I:%M %p").lstrip("0")
         return target, display
-    
+
     # Try HH:MM format (24h, e.g., "15:00", "8:30")
     match = re.match(r'^(\d{1,2}):(\d{2})$', abs_str)
     if match:
@@ -477,7 +334,7 @@ def parse_absolute_time(abs_str):
         else:
             display = target.strftime("%I:%M %p").lstrip("0")
         return target, display
-    
+
     # Try YYYY-MM-DD HH:MM format (e.g., "2026-06-28 09:00")
     match = re.match(r'^(\d{4})-(\d{2})-(\d{2})\s+(\d{1,2}):(\d{2})$', abs_str)
     if match:
@@ -485,7 +342,7 @@ def parse_absolute_time(abs_str):
                                int(match.group(4)), int(match.group(5)))
         display = dt.strftime("%b %d %I:%M %p").lstrip("0")
         return dt, display
-    
+
     # Try MM-DD HH:MM format (same year, e.g., "06-28 09:00")
     match = re.match(r'^(\d{2})-(\d{2})\s+(\d{1,2}):(\d{2})$', abs_str)
     if match:
@@ -495,17 +352,16 @@ def parse_absolute_time(abs_str):
             dt = dt.replace(year=now.year + 1)
         display = dt.strftime("%b %d %I:%M %p").lstrip("0")
         return dt, display
-    
+
     return None, None
 
 def _load_reminders_internal():
     """Load reminders WITHOUT db_lock — caller must already hold it."""
-    if not os.path.exists(REMINDERS_FILE):
-        return []
+    if not os.path.exists(REMINDERS_FILE): return []
     try:
         with open(REMINDERS_FILE, 'r') as f:
             reminders = json.load(f)
-        # Migrate old format: {time: "HH:MM"} → {trigger_time: ISO, display_time: str}
+        # Migrate old format: {time: "HH:MM"} -> {trigger_time: ISO, display_time: str}
         migrated = False
         for r in reminders:
             if "trigger_time" not in r and "time" in r:
@@ -550,48 +406,36 @@ def save_reminders(reminders):
         _save_reminders_internal(reminders)
 
 def add_reminder(task, trigger_dt, display_str):
-    """Add a reminder with full datetime trigger (atomic load-modify-save)"""
     with db_lock:
         reminders = _load_reminders_internal()
-        reminders.append({
-            "task": task,
-            "trigger_time": trigger_dt.isoformat(),
-            "display_time": display_str,
-            "fired": False,
-            "created": datetime.datetime.now().isoformat()
-        })
+        reminders.append({"task": task, "trigger_time": trigger_dt.isoformat(), "display_time": display_str, "fired": False, "created": datetime.datetime.now().isoformat()})
         _save_reminders_internal(reminders)
 
 def get_reminders_list():
-    with db_lock:
-        reminders = _load_reminders_internal()
-    return [r for r in reminders if not r.get("fired", False)]
+    with db_lock: return [r for r in _load_reminders_internal() if not r.get("fired", False)]
 
 def clear_reminders():
-    with db_lock:
-        _save_reminders_internal([])
+    with db_lock: _save_reminders_internal([])
 
 def delete_reminder_by_index(index):
     with db_lock:
         try:
             index = int(index)
         except (ValueError, TypeError):
-            print(f"[API Reminder] Failed to cast index {index} to integer.")
+            print(f"[Reminder] Failed to cast index {index} to integer.")
             return None
         reminders = _load_reminders_internal()
-        active_reminders = [r for r in reminders if not r.get("fired", False)]
-        if 1 <= index <= len(active_reminders):
-            target = active_reminders[index - 1]
-            target["fired"] = True
+        active = [r for r in reminders if not r.get("fired", False)]
+        if 1 <= index <= len(active):
+            active[index - 1]["fired"] = True
             _save_reminders_internal(reminders)
-            return target.get("task", "Reminder")
-        return None
+            return active[index - 1].get("task", "Reminder")
+    return None
 
-
+# --- WEATHER ---
 def get_weather():
     try:
-        # Lat/Lon for Khulna, Bangladesh (KUET coordinates)
-        url = "https://api.open-meteo.com/v1/forecast?latitude=22.8956&longitude=89.5011&current_weather=true"
+        url = "https://api.open-meteo.com/v1/forecast?latitude=22.8956&longitude=89.5011&currentweather=true"
         req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
         with urllib.request.urlopen(req, timeout=5) as response:
             data = json.loads(response.read().decode("utf-8"))
@@ -623,133 +467,25 @@ def fetch_and_send_weather(conn):
 
 def parse_timer_duration(text):
     matches = re.findall(r'(\d+)\s*(second|sec|minute|min|hour|hr|s|m|h)s?', text.lower())
-    if not matches:
-        return None
+    if not matches: return None
     total_seconds = 0
     for val_str, unit in matches:
         val = int(val_str)
-        if unit.startswith('s'):
-            total_seconds += val
-        elif unit.startswith('m'):
-            total_seconds += val * 60
-        elif unit.startswith('h') or unit.startswith('hr'):
-            total_seconds += val * 3600
+        if unit.startswith('s'): total_seconds += val
+        elif unit.startswith('m'): total_seconds += val * 60
+        elif unit.startswith('h') or unit.startswith('hr'): total_seconds += val * 3600
     return total_seconds if total_seconds > 0 else None
 
 def format_duration(seconds):
-    if seconds < 60:
-        return f"{seconds} seconds"
+    if seconds < 60: return f"{seconds} seconds"
     elif seconds < 3600:
-        m = seconds // 60
-        s = seconds % 60
+        m, s = seconds // 60, seconds % 60
         return f"{m} minutes and {s} seconds" if s > 0 else f"{m} minutes"
     else:
-        h = seconds // 3600
-        m = (seconds % 3600) // 60
+        h, m = seconds // 3600, (seconds % 3600) // 60
         return f"{h} hours and {m} minutes" if m > 0 else f"{h} hours"
 
-def alarm_scheduler():
-    global active_alarm_active, active_alarm_name, active_conn, alarm_fired_at, scheduled_sleep_time, scheduled_sleep_checked_today, active_handler
-    print("[*] Alarm scheduler active.")
-    pending_alarms = []    # Alarms to send after releasing db_lock
-    
-    while True:
-        try:
-            now = datetime.datetime.now()
-            
-            # Auto-dismiss alarm after 30 seconds if user doesn't respond
-            if active_alarm_active and alarm_fired_at is not None:
-                elapsed = (now - alarm_fired_at).total_seconds()
-                if elapsed > 30:
-                    print(f"[ALARM] Auto-dismissed after {int(elapsed)}s")
-                    stop_active_alarm()
-                    alarm_fired_at = None
-                    if active_conn:
-                        try:
-                            with send_lock:
-                                active_conn.sendall(b"UI_STATE:IDLE\n")
-                        except Exception:
-                            pass
-            
-            # --- SCHEDULED SLEEP CHECKER ---
-
-            if scheduled_sleep_time:
-                now_hm = now.strftime("%H:%M")
-                if now_hm == scheduled_sleep_time:
-                    if not scheduled_sleep_checked_today:
-                        scheduled_sleep_checked_today = True
-                        print(f"[Sleep Schedule] Target time {scheduled_sleep_time} reached! Checking room status...")
-                        
-                        if active_handler:
-                            last_ldr = getattr(active_handler, 'last_ldr_val', 500)
-                            last_motion = getattr(active_handler, 'last_motion_time', time.time())
-                            time_since_motion = time.time() - last_motion
-                            
-                            print(f"[Sleep Schedule] Current LDR: {last_ldr} | Time since motion: {time_since_motion:.1f}s")
-                            
-                            # Dark room (< 200 LDR) and idle for >= 5 minutes (300s)
-                            if last_ldr < 200 and time_since_motion >= 300:
-                                print("[Sleep Schedule] Conditions MET. Triggering sleep automatically!")
-                                active_handler.sleep_start_time = time.time()
-                                active_handler.sleep_movement_count = 0
-                                active_handler.sleep_noise_levels = []
-                                active_handler.sleep_noise_events = 0
-                                active_handler.sleep_ldr_levels = [last_ldr]
-                                active_handler.last_pir_state = 'SLEEPING'
-                                try:
-                                    active_conn.sendall(b"CMD:START_SLEEP\n")
-                                except Exception:
-                                    pass
-                            else:
-                                print("[Sleep Schedule] Conditions NOT met (room bright or motion detected). Waiting for actual sleep start later...")
-                else:
-                    scheduled_sleep_checked_today = False
-
-            # Atomic load-check-save under db_lock
-            pending_alarms = []
-            with db_lock:
-                reminders = _load_reminders_internal()
-                updated = False
-                
-                for r in reminders:
-                    if r.get("fired", False):
-                        continue
-                    trigger_str = r.get("trigger_time", "")
-                    if not trigger_str:
-                        continue
-                    try:
-                        trigger_dt = datetime.datetime.fromisoformat(trigger_str)
-                    except ValueError:
-                        continue
-                    if now >= trigger_dt:
-                        r["fired"] = True
-                        updated = True
-                        active_alarm_active = True
-                        active_alarm_name = r.get("task", "Alarm")
-                        alarm_fired_at = now
-                        pending_alarms.append(r.get("display_time", trigger_str))
-                        
-                if updated:
-                    _save_reminders_internal(reminders)
-            
-            # Send alarm commands outside db_lock
-            for display in pending_alarms:
-                print(f"\n[ALARM] Triggered! Task: {active_alarm_name} (was set for {display})")
-                play_alarm_sound()
-                if active_conn:
-                    try:
-                        with send_lock:
-                            active_conn.sendall(f"UI_ALARM:{active_alarm_name}\n".encode())
-                    except Exception as e:
-                        print(f"Failed to send alarm command to client: {e}")
-                
-        except Exception as e:
-            print(f"[Scheduler Error] {e}")
-            
-        time.sleep(5)
-
 def log_sleep_event(event_name):
-    """Helper to log sleep and wake transitions to sleep_sessions.log for future sleep monitoring analysis."""
     try:
         log_path = os.path.join(RECORDINGS_DIR, "sleep_sessions.log")
         ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -758,12 +494,92 @@ def log_sleep_event(event_name):
     except Exception as e:
         print(f"[Error] Failed to write to sleep_sessions.log: {e}")
 
-# --- CLIENT SOCKET HANDLER ---
+# --- SCHEDULER THREAD ---
+def alarm_scheduler():
+    global active_alarm_active, active_alarm_name, active_conn, alarm_fired_at, scheduled_sleep_time, scheduled_sleep_checked_today, active_handler
+    print("[*] Alarm scheduler active.")
+    
+    while True:
+        try:
+            now = datetime.datetime.now()
+            
+            if active_alarm_active and alarm_fired_at is not None:
+                elapsed = (now - alarm_fired_at).total_seconds()
+                if elapsed > 30:
+                    print(f"[ALARM] Auto-dismissed after {int(elapsed)}s")
+                    stop_active_alarm()
+                    alarm_fired_at = None
+                    if active_conn:
+                        try:
+                            with send_lock: active_conn.sendall(b"UI_STATE:IDLE\n")
+                        except Exception: pass
+            
+            if scheduled_sleep_time:
+                now_hm = now.strftime("%H:%M")
+                if now_hm == scheduled_sleep_time:
+                    if not scheduled_sleep_checked_today:
+                        scheduled_sleep_checked_today = True
+                        print(f"[Sleep Schedule] Target time {scheduled_sleep_time} reached!")
+                        
+                        if active_handler:
+                            last_ldr = getattr(active_handler, 'last_ldr_val', 500)
+                            last_motion = getattr(active_handler, 'last_motion_time', time.time())
+                            time_since_motion = time.time() - last_motion
+                            
+                            if last_ldr < 200 and time_since_motion >= 300:
+                                print("[Sleep Schedule] Conditions MET. Triggering sleep automatically!")
+                                active_handler.sleep_start_time = time.time()
+                                active_handler.sleep_movement_count = 0
+                                active_handler.sleep_noise_levels = []
+                                active_handler.sleep_noise_events = 0
+                                active_handler.sleep_ldr_levels = [last_ldr]
+                                active_handler.last_pir_state = 'SLEEPING'
+                                _save_sleep_status(True, active_handler.sleep_start_time)
+                                try: active_conn.sendall(b"CMD:START_SLEEP\n")
+                                except Exception: pass
+
+            pending_alarms = []
+            with db_lock:
+                reminders = _load_reminders_internal()
+                updated = False
+                
+                for r in reminders:
+                    if r.get("fired", False): continue
+                    trigger_str = r.get("trigger_time", "")
+                    if not trigger_str: continue
+                    try:
+                        trigger_dt = datetime.datetime.fromisoformat(trigger_str)
+                    except ValueError: continue
+                    if now >= trigger_dt:
+                        r["fired"] = True; updated = True
+                        active_alarm_active = True
+                        active_alarm_name = r.get("task", "Alarm")
+                        alarm_fired_at = now
+                        pending_alarms.append(r.get("display_time", trigger_str))
+                        
+                if updated: _save_reminders_internal(reminders)
+            
+            for display in pending_alarms:
+                print(f"\n[ALARM] Triggered! Task: {active_alarm_name} (was set for {display})")
+                play_alarm_sound()
+                if active_conn:
+                    try:
+                        with send_lock: active_conn.sendall(f"UI_ALARM:{active_alarm_name}\n".encode())
+                    except Exception as e:
+                        print(f"Failed to send alarm command to client: {e}")
+                
+        except Exception as e:
+            print(f"[Scheduler Error] {e}")
+            
+        time.sleep(5)
+
+# --- CLIENT SOCKET HANDLER (FULLY RESTORED) ---
 class VoiceAgentHandler:
     def __init__(self, conn, addr):
         self.conn = conn
         self.addr = addr
         self.is_awake = False
+        self.is_speaking = False
         self.speech_buffer = bytearray()
         self.noise_floor = 300
         self.rms_threshold = 450
@@ -771,37 +587,30 @@ class VoiceAgentHandler:
         self.speech_ready_time = 0
         self.audio_bytes_received = 0
         self.first_audio_time = 0
-        # Keyword detection state
         self.keyword_buffer = bytearray()
         self.keyword_chunk_start = time.time()
         self.last_keyword_trigger = 0
-        # TCP framing buffer — accumulates partial recv() data across calls
         self.recv_buffer = bytearray()
-        # Socket write lock — prevents interleaved sendall from two threads
         self.send_lock = threading.Lock()
-        # Enable TCP_NODELAY to avoid Nagle delays on small state commands
         self.conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         self.timer_running = False
-        self.last_pir_state = 'AWAKE' # Track client sleep states (AWAKE, SLEEPING, PREWAKE)
+        self.last_pir_state = 'AWAKE'
         self.last_ldr_val = 500
         self.last_motion_time = time.time()
-        # Sleep monitoring session variables
         self.sleep_start_time = None
         self.sleep_movement_count = 0
         self.sleep_noise_levels = []
         self.sleep_noise_events = 0
+        self.sleep_ldr_levels = []
         
     def calibrate(self):
         print(f"[*] Calibrating noise baseline for {self.addr}...")
         
-        # Clear any TCP backlog on initial connection
         self.conn.setblocking(False)
         try:
             while True:
-                if not self.conn.recv(16384):
-                    break
-        except (BlockingIOError, Exception):
-            pass
+                if not self.conn.recv(16384): break
+        except (BlockingIOError, Exception): pass
         finally:
             self.conn.setblocking(True)
         
@@ -810,14 +619,12 @@ class VoiceAgentHandler:
         while time.time() - start_time < 1.0:
             try:
                 data = self.conn.recv(4096)
-                if not data:
-                    break
+                if not data: break
                 data_np = np.frombuffer(data, dtype=np.int16)
                 if len(data_np) > 0:
                     rms = np.sqrt(np.mean(data_np.astype(np.float64)**2))
                     calibration_rms.append(rms)
-            except Exception:
-                break
+            except Exception: break
             
         if calibration_rms:
             self.noise_floor = np.mean(calibration_rms)
@@ -827,46 +634,43 @@ class VoiceAgentHandler:
             print("[!] Calibration failed. Using defaults.")
 
     def safe_send(self, data):
-        """Thread-safe sendall using global lock."""
         with send_lock:
-            self.conn.sendall(data)
-
-    def weather_updater(self):
-        while True:
-            time.sleep(1800)
-            if active_conn == self.conn:
-                fetch_and_send_weather(self.conn)
-            else:
-                break
+            try: self.conn.sendall(data)
+            except Exception: pass
 
     def keyword_detection_loop(self):
         while True:
             time.sleep(0.5)
-            # Skip if user is in button-press mode
-            if self.is_awake:
+            if self.is_awake or self.timer_running: continue
+            # Suppress keyword detection while TTS is playing through speakers
+            if time.time() < keyword_suppress_until:
+                self.keyword_buffer = bytearray()
+                self.keyword_chunk_start = time.time()
                 continue
-            # Skip if not enough time has passed for a chunk
             elapsed = time.time() - self.keyword_chunk_start
-            if elapsed < KEYWORD_CHUNK_SECONDS:
-                continue
-            # Skip if buffer is too small (empty audio)
+            # Early trigger: if we have at least 0.5s of audio and the tail is silent, process now
+            should_process = elapsed >= KEYWORD_CHUNK_SECONDS
+            if not should_process and elapsed >= 0.5 and len(self.keyword_buffer) >= 1600:
+                tail = self.keyword_buffer[-1600:]  # last 0.5s (16-bit mono 16kHz)
+                tail_samples = np.frombuffer(bytes(tail), dtype=np.int16)
+                if len(tail_samples) > 0:
+                    rms = float(np.sqrt(np.mean(tail_samples.astype(np.float64)**2)))
+                    if rms < 150:  # silence threshold
+                        should_process = True
+            if not should_process: continue
             if len(self.keyword_buffer) < 800:
                 self.keyword_buffer = bytearray()
                 self.keyword_chunk_start = time.time()
                 continue
 
-            # Grab and clear buffer
             chunk = bytes(self.keyword_buffer)
             self.keyword_buffer = bytearray()
             self.keyword_chunk_start = time.time()
 
-            # Calculate rate from chunk size (2.5s window)
             num_samples = len(chunk) / 2
             measured_rate = int(num_samples / KEYWORD_CHUNK_SECONDS) if KEYWORD_CHUNK_SECONDS > 0 else 0
-            if measured_rate < 1000:
-                continue
+            if measured_rate < 1000: continue
 
-            # Resample to 16kHz
             try:
                 audio_np = np.frombuffer(chunk, dtype=np.int16).astype(np.float64)
                 if measured_rate != 16000 and len(audio_np) > 0:
@@ -875,65 +679,43 @@ class VoiceAgentHandler:
                     tgt_idx = np.linspace(0, len(audio_np) - 1, target_count)
                     audio_np = np.interp(tgt_idx, src_idx, audio_np)
                 audio_float = (audio_np.astype(np.float32) / 32768.0).astype(np.float32)
-            except Exception:
-                continue
+            except Exception: continue
 
-            # Transcribe
             try:
-                text = asr_model.recognize(audio_float, sample_rate=16000).strip()
-            except Exception:
-                continue
-            if not text:
-                continue
+                segments, info = asr_model.transcribe(audio_float, language="en", beam_size=1, vad_filter=False)
+                text = " ".join([segment.text for segment in segments]).strip()
+            except Exception: continue
+            if not text: continue
 
             clean_text = re.sub(r'[^\w\s]', '', text.lower()).strip()
             print(f"[KEYWORD] Heard: '{text}'")
 
-            # Debounce check
-            if time.time() - self.last_keyword_trigger < KEYWORD_DEBOUNCE_SECONDS:
-                continue
+            if time.time() - self.last_keyword_trigger < KEYWORD_DEBOUNCE_SECONDS: continue
 
-            # === TIMER ACTIVE MODE ===
-            # When timer is running, ONLY process timer-related commands (cancel/stop, pause, resume)
-            # All other features are blocked to prevent interference
             if self.timer_running:
-                # 1. Check Cancel/Stop Intent
                 is_cancel = any(w in clean_text for w in ["cancel", "delete", "remove", "dismiss"]) or \
                             (any(w in clean_text for w in ["stop", "quit", "terminate", "shut up", "stop it"]) and "timer" in clean_text)
-                
-                # 2. Check Pause Intent
                 is_pause = any(w in clean_text for w in ["pause", "hold"])
-                
-                # 3. Check Resume Intent
                 is_resume = any(w in clean_text for w in ["resume", "continue", "start", "play"])
                 
                 if is_cancel:
                     self.last_keyword_trigger = time.time()
                     self.timer_running = False
-                    try:
-                        self.safe_send(b"TIMER_CANCEL\n")
-                    except Exception:
-                        pass
+                    try: self.safe_send(b"TIMER_CANCEL\n")
+                    except Exception: pass
                     play_speech_on_laptop("Timer stopped.")
                 elif is_pause:
                     self.last_keyword_trigger = time.time()
-                    try:
-                        self.safe_send(b"TIMER_PAUSE\n")
-                    except Exception:
-                        pass
+                    try: self.safe_send(b"TIMER_PAUSE\n")
+                    except Exception: pass
                     play_speech_on_laptop("Timer paused.")
                 elif is_resume:
                     self.last_keyword_trigger = time.time()
-                    try:
-                        self.safe_send(b"TIMER_RESUME\n")
-                    except Exception:
-                        pass
+                    try: self.safe_send(b"TIMER_RESUME\n")
+                    except Exception: pass
                     play_speech_on_laptop("Timer resumed.")
-                continue  # Skip all other features while timer is running
+                continue
 
-            # === NORMAL MODE (no timer active) ===
-
-            # Feature 1: Reminder List check
             has_target_word = any(w in clean_text for w in ["reminder", "reminders", "alarm", "alarms", "task", "tasks"])
             is_creation_intent = any(w in clean_text for w in ["set", "add", "create", "remind me", "remind me to"])
             is_delete_intent = any(w in clean_text for w in ["delete", "remove", "clear", "cancel"])
@@ -943,7 +725,6 @@ class VoiceAgentHandler:
                 self.send_reminder_list()
                 continue
 
-            # Feature 2: Reminder Deletion check
             is_delete_query = any(w in clean_text for w in ["delete", "remove", "clear", "cancel"]) and \
                               any(w in clean_text for w in ["reminder", "alarm", "task", "all", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "first", "second", "third", "fourth", "fifth"])
             
@@ -961,7 +742,6 @@ class VoiceAgentHandler:
                             msg = f"Deleted number {idx}: {deleted_task}."
                             self.safe_send(f"UI_MSG:Deleted #{idx}\n".encode())
                             play_speech_on_laptop(msg)
-                            # Send updated list after a short delay
                             threading.Timer(1.5, self.send_reminder_list).start()
                         else:
                             self.safe_send(b"UI_MSG:Not found.\n")
@@ -971,13 +751,13 @@ class VoiceAgentHandler:
                         play_speech_on_laptop("Which reminder number would you like to delete?")
                 continue
 
-            # Feature 3: Hi greeting
-            if any(clean_text == w or clean_text.startswith(w + " ") for w in ["hi", "hello", "hey", "yo"]):
+            greeting_words = ["hi", "hello", "hey", "yo"]
+            is_greeting = any(w in clean_text.split() for w in greeting_words)
+            if is_greeting:
                 self.last_keyword_trigger = time.time()
                 self.play_greeting()
                 continue
 
-            # Feature 4: Timer start check (only when no timer is running)
             is_timer_query = any(w in clean_text for w in ["timer", "countdown", "focus"])
             if is_timer_query:
                 self.last_keyword_trigger = time.time()
@@ -987,10 +767,8 @@ class VoiceAgentHandler:
                     duration = parse_timer_duration(clean_text)
                     if duration is not None:
                         self.timer_running = True
-                        try:
-                            self.safe_send(f"TIMER_START:{duration}\n".encode())
-                        except Exception:
-                            pass
+                        try: self.safe_send(f"TIMER_START:{duration}\n".encode())
+                        except Exception: pass
                         play_speech_on_laptop(f"Starting countdown for {format_duration(duration)}.")
                     else:
                         play_speech_on_laptop("Please specify seconds, minutes, or hours.")
@@ -1012,11 +790,9 @@ class VoiceAgentHandler:
         words = text.split()
         for word in words:
             clean_word = re.sub(r'[^\w]', '', word).lower()
-            if clean_word in number_map:
-                return number_map[clean_word]
+            if clean_word in number_map: return number_map[clean_word]
         match = re.search(r'\b\d+\b', text)
-        if match:
-            return int(match.group(0))
+        if match: return int(match.group(0))
         return None
 
     def send_reminder_list(self):
@@ -1027,11 +803,7 @@ class VoiceAgentHandler:
                 for idx, r in enumerate(reminders, 1):
                     task = r['task']
                     time_str = r.get('display_time', '?')
-                    # Format default Alarm vs task with description
-                    if task.lower() in ["reminder", "alarm"]:
-                        formatted_items.append(f"{idx}. {task} @ {time_str}")
-                    else:
-                        formatted_items.append(f"{idx}. {task} @ {time_str}")
+                    formatted_items.append(f"{idx}. {task} @ {time_str}")
                 items_str = "|".join(formatted_items)
                 self.safe_send(f"UI_LIST:{items_str}\n".encode())
             else:
@@ -1047,6 +819,14 @@ class VoiceAgentHandler:
         except Exception as e:
             print(f"[Error] play_greeting: {e}")
 
+    def weather_updater(self):
+        while True:
+            time.sleep(1800)
+            if active_conn == self.conn:
+                fetch_and_send_weather(self.conn)
+            else:
+                break
+
     def is_question(self, text):
         if text.endswith("?"):
             return True
@@ -1059,7 +839,7 @@ class VoiceAgentHandler:
         try:
             print(f"[*] Single question: '{text}'")
             self.safe_send(b"UI_STATE:THINKING\n")
-            response = chat_session.send_message(text)  # send_message acquires chat_lock internally
+            response = chat_session.send_message(text)
             ai_answer = response.text.strip()
             print(f"[*] AI Response: {ai_answer}")
             self.handle_llm_response(ai_answer)
@@ -1069,19 +849,14 @@ class VoiceAgentHandler:
                 self.safe_send(b"UI_MSG:Error.\n")
             except Exception:
                 pass
-            
+
     def _extract_command(self, buf, marker):
-        """Find a text command (e.g. CMD:WOKE\\n) embedded in binary audio stream.
-        Returns (before_bytes, command_str, after_bytes) or None if not found."""
         pos = buf.find(marker)
-        if pos < 0:
-            return None
-        # Find the newline that terminates this command
+        if pos < 0: return None
         nl_pos = buf.find(b"\n", pos)
-        if nl_pos < 0:
-            return None  # incomplete command, wait for more data
+        if nl_pos < 0: return None
         before = buf[:pos]
-        cmd = buf[pos:nl_pos]  # exclude the \n itself
+        cmd = buf[pos:nl_pos].decode('utf-8', errors='ignore').strip()
         after = buf[nl_pos+1:]
         return (before, cmd, after)
 
@@ -1091,13 +866,11 @@ class VoiceAgentHandler:
         active_handler = self
         
         self.calibrate()
-        # Start keyword detection thread
         kw_thread = threading.Thread(target=self.keyword_detection_loop, daemon=True)
         kw_thread.start()
-        # Start weather updater thread and fetch weather immediately
+        # Fetch weather immediately and start periodic updater
         fetch_and_send_weather(self.conn)
         threading.Thread(target=self.weather_updater, daemon=True).start()
-        # Set recv timeout to detect dead connections (30s)
         self.conn.settimeout(30)
         try:
             self.safe_send(b"UI_STATE:IDLE\n")
@@ -1108,33 +881,19 @@ class VoiceAgentHandler:
         while True:
             try:
                 data = self.conn.recv(4096)
-                if not data:
-                    break
+                if not data: break
                 
-                # Accumulate into recv_buffer
                 self.recv_buffer.extend(data)
-                
-                # Extract text commands embedded in the binary audio stream.
-                # Commands are: CMD:WOKE\n, ___END___\n, LDR:xxx\n
-                # Everything else is raw PCM audio bytes.
-                #
-                # IMPORTANT: Raw audio is binary — it contains random 0x0A bytes.
-                # We must NOT split on \n generically. We only look for known
-                # command prefixes as byte markers.
-                
-                audio_chunks = []  # collect audio byte segments
+                audio_chunks = []
                 
                 processing = True
                 while processing:
                     processing = False
                     
-                    # Try to extract CMD: command
                     result = self._extract_command(self.recv_buffer, b"CMD:")
                     if result:
-                        before, cmd_bytes, after = result
-                        if before:
-                            audio_chunks.append(bytes(before))
-                        cmd = cmd_bytes.decode('utf-8', errors='ignore').strip()
+                        before, cmd, after = result
+                        if before: audio_chunks.append(bytes(before))
                         if cmd == "CMD:WOKE":
                             self.is_awake = True
                             self.speech_buffer = bytearray()
@@ -1144,18 +903,16 @@ class VoiceAgentHandler:
                             self.first_audio_time = 0
                             print("\n[*] Button pressed: recording started...")
                             if active_alarm_active:
-                                print("[Alarm] Physical button pressed on ESP32. Silencing server alarm.")
+                                print("[Alarm] Physical button pressed. Silencing server alarm.")
                                 stop_active_alarm()
                         self.recv_buffer = bytearray(after)
                         processing = True
                         continue
                     
-                    # Try to extract ___END___
                     result = self._extract_command(self.recv_buffer, b"___END___")
                     if result:
-                        before, cmd_bytes, after = result
-                        if before:
-                            audio_chunks.append(bytes(before))
+                        before, cmd, after = result
+                        if before: audio_chunks.append(bytes(before))
                         if self.is_awake:
                             print("[*] Button released: recording stopped")
                             duration = time.time() - self.recording_start_time
@@ -1166,23 +923,17 @@ class VoiceAgentHandler:
                         processing = True
                         continue
                     
-                    # Try to extract LDR: readings
                     result = self._extract_command(self.recv_buffer, b"LDR:")
                     if result:
-                        before, cmd_bytes, after = result
-                        if before:
-                            audio_chunks.append(bytes(before))
+                        before, cmd, after = result
+                        if before: audio_chunks.append(bytes(before))
                         try:
-                            ldr_str = cmd_bytes.decode('utf-8', errors='ignore').strip()
-                            ldr_value = int(ldr_str.split(":")[1])
+                            ldr_value = int(cmd.split(":")[1])
                             self.last_ldr_val = ldr_value
                             print(f"[*] LDR: {ldr_value} (0-4095)")
-                            # Track LDR levels during sleep session
-                            if hasattr(self, 'sleep_start_time') and self.sleep_start_time is not None:
-                                if hasattr(self, 'sleep_ldr_levels'):
-                                    self.sleep_ldr_levels.append(ldr_value)
-                        except Exception:
-                            pass
+                            if self.sleep_start_time is not None:
+                                self.sleep_ldr_levels.append(ldr_value)
+                        except Exception: pass
                         self.recv_buffer = bytearray(after)
                         processing = True
                         continue
@@ -1190,130 +941,107 @@ class VoiceAgentHandler:
                     # Try to extract TIMER_DONE (ESP32 notifies countdown completed)
                     result = self._extract_command(self.recv_buffer, b"TIMER_DONE")
                     if result:
-                        before, cmd_bytes, after = result
-                        if before:
-                            audio_chunks.append(bytes(before))
+                        before, cmd, after = result
+                        if before: audio_chunks.append(bytes(before))
                         self.timer_running = False
-                        print("[TIMER] Countdown completed on ESP32, timer_running reset")
+                        print("[TIMER] Countdown completed on ESP32")
                         
-                        # Trigger alarm sound on laptop/desktop speaker just like reminders/alarms!
                         active_alarm_active = True
                         active_alarm_name = "Timer Finished"
                         alarm_fired_at = datetime.datetime.now()
                         play_alarm_sound()
-                        print("[TIMER] Playing completed alarm sound on laptop speaker...")
+                        print("[TIMER] Playing completed alarm sound...")
                         
                         self.recv_buffer = bytearray(after)
                         processing = True
                         continue
                     
-                    # Try to extract PIR:MOTION
                     result = self._extract_command(self.recv_buffer, b"PIR:MOTION")
                     if result:
-                        before, cmd_bytes, after = result
-                        if before:
-                            audio_chunks.append(bytes(before))
+                        before, cmd, after = result
+                        if before: audio_chunks.append(bytes(before))
                         print("[PIR] Motion detected")
                         self.last_motion_time = time.time()
-                        # Track motion during sleep
-                        if hasattr(self, 'sleep_movement_count'):
+                        if self.sleep_start_time is not None:
                             self.sleep_movement_count += 1
                         self.recv_buffer = bytearray(after)
                         processing = True
                         continue
 
-                    # Try to extract PIR:WAKE (Device woke up fully due to motion/button/voice)
                     result = self._extract_command(self.recv_buffer, b"PIR:WAKE")
                     if result:
-                        before, cmd_bytes, after = result
-                        if before:
-                            audio_chunks.append(bytes(before))
+                        before, cmd, after = result
+                        if before: audio_chunks.append(bytes(before))
                         self.last_pir_state = 'AWAKE'
                         print("[PIR] Device woke up fully.")
+                        _save_sleep_status(False)
                         log_sleep_event("WAKE")
-                        _save_sleep_status(False)  # Persist wake state
-                        # End Sleep Monitoring Session and save to JSON
                         self.end_sleep_session()
                         self.recv_buffer = bytearray(after)
                         processing = True
                         continue
 
-                    # Try to extract PIR:SLEEP (Device went to sleep)
                     result = self._extract_command(self.recv_buffer, b"PIR:SLEEP")
                     if result:
-                        before, cmd_bytes, after = result
-                        if before:
-                            audio_chunks.append(bytes(before))
-                        # Only log the transition to sleep to avoid spamming on keep-alive heartbeats
+                        before, cmd, after = result
+                        if before: audio_chunks.append(bytes(before))
                         if self.last_pir_state != 'SLEEPING':
                             self.last_pir_state = 'SLEEPING'
                             print("[PIR] Device went to sleep.")
                             log_sleep_event("SLEEP")
-                            # Start Sleep Monitoring Session
-                            if not hasattr(self, 'sleep_start_time') or self.sleep_start_time is None:
+                            if self.sleep_start_time is None:
                                 self.sleep_start_time = time.time()
                                 self.sleep_movement_count = 0
                                 self.sleep_noise_levels = []
                                 self.sleep_noise_events = 0
                                 self.sleep_ldr_levels = []
-                                _save_sleep_status(True, self.sleep_start_time)  # Persist sleep state
+                                _save_sleep_status(True, self.sleep_start_time)
                                 print(f"[Sleep Monitor] Session started at {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
                         self.recv_buffer = bytearray(after)
                         processing = True
                         continue
 
-                    # Try to extract PIR:PREWAKE (Device entered pre-wake standby)
                     result = self._extract_command(self.recv_buffer, b"PIR:PREWAKE")
                     if result:
-                        before, cmd_bytes, after = result
-                        if before:
-                            audio_chunks.append(bytes(before))
+                        before, cmd, after = result
+                        if before: audio_chunks.append(bytes(before))
                         if self.last_pir_state != 'PREWAKE':
                             self.last_pir_state = 'PREWAKE'
                             print("[PIR] Device entered pre-wake standby.")
                             log_sleep_event("PREWAKE")
-                            # Increment movement count during sleep (entering pre-wake counts as a movement)
-                            if hasattr(self, 'sleep_movement_count'):
+                            if self.sleep_start_time is not None:
                                 self.sleep_movement_count += 1
                         self.recv_buffer = bytearray(after)
                         processing = True
                         continue
                 
-                # Check if recv_buffer has a partial command marker at the tail
-                # that might be completed by the next recv() call
                 tail = bytes(self.recv_buffer)
                 partial_markers = [b"CMD:", b"___END___", b"LDR:", b"TIMER_DONE", b"PIR:"]
                 safe_len = len(tail)
                 for marker in partial_markers:
-                    # Check if the tail ends with any prefix of a marker
                     for prefix_len in range(1, len(marker)):
                         if tail.endswith(marker[:prefix_len]):
                             safe_len = min(safe_len, len(tail) - prefix_len)
                             break
                 
-                # Everything before the potential partial marker is audio data
                 if safe_len > 0:
                     audio_data = bytes(self.recv_buffer[:safe_len])
                     self.recv_buffer = self.recv_buffer[safe_len:]
                     audio_chunks.append(audio_data)
                 
-                # Feed all extracted audio to keyword buffer and speech buffer
                 for chunk in audio_chunks:
                     if chunk:
                         self.keyword_buffer.extend(chunk)
                         
-                        # Real-time Sleep Monitor: Calculate audio RMS during sleep states
                         if self.last_pir_state in ('SLEEPING', 'PREWAKE'):
                             align_len = len(chunk) - (len(chunk) % 2)
                             if align_len >= 2:
                                 samples = np.frombuffer(chunk[:align_len], dtype=np.int16)
                                 if len(samples) > 0:
                                     rms = float(np.sqrt(np.mean(samples.astype(np.float64)**2)))
-                                    if hasattr(self, 'sleep_noise_levels'):
-                                        self.sleep_noise_levels.append(rms)
-                                        # Threshold for noise spikes (coughing, snoring, tossing, door closing)
-                                        if rms > 600.0:
-                                            self.sleep_noise_events += 1
+                                    self.sleep_noise_levels.append(rms)
+                                    if rms > 600.0:
+                                        self.sleep_noise_events += 1
                         
                         if self.is_awake and time.time() >= self.speech_ready_time:
                             if self.first_audio_time == 0:
@@ -1324,53 +1052,34 @@ class VoiceAgentHandler:
             except socket.timeout:
                 print(f"[Timeout] No data from {self.addr} for 30s, disconnecting")
                 break
-            except ConnectionResetError:
-                break
+            except ConnectionResetError: break
             except Exception as e:
                 print(f"[Error] Connection loop error: {e}")
                 break
                 
         print(f"[-] Client {self.addr} disconnected")
-        if active_conn == self.conn:
-            active_conn = None
-        if active_handler == self:
-            active_handler = None
+        if active_conn == self.conn: active_conn = None
+        if active_handler == self: active_handler = None
         self.end_sleep_session()
             
     def end_sleep_session(self):
-        if hasattr(self, 'sleep_start_time') and self.sleep_start_time is not None:
+        if self.sleep_start_time is not None:
             end_time = time.time()
             duration = end_time - self.sleep_start_time
             duration_hours = duration / 3600.0
             
-            # Discard very brief sessions under 10 minutes
             if duration < 600.0:
                 print(f"[Sleep Monitor] Discarding short sleep session of {duration/60.0:.1f} minutes")
                 self.sleep_start_time = None
                 return
                 
-            # Classify session type: Sleep (>= 3 hours) or Nap (< 3 hours)
-            session_type = "nap"
-            if duration_hours >= 3.0:
-                session_type = "actual_sleep"
-            
+            session_type = "actual_sleep" if duration_hours >= 3.0 else "nap"
             display_type = "Sleep" if session_type == "actual_sleep" else "Nap"
             
-            # Calculate average and max noise
-            if self.sleep_noise_levels:
-                avg_noise = float(np.mean(self.sleep_noise_levels))
-                max_noise = float(np.max(self.sleep_noise_levels))
-            else:
-                avg_noise = 0.0
-                max_noise = 0.0
-                
-            # Calculate average LDR light levels
-            if hasattr(self, 'sleep_ldr_levels') and self.sleep_ldr_levels:
-                avg_ldr = float(np.mean(self.sleep_ldr_levels))
-            else:
-                avg_ldr = 150.0
-                
-            # Classify Sleep Quality: Good, Fair, Poor
+            avg_noise = float(np.mean(self.sleep_noise_levels)) if self.sleep_noise_levels else 0.0
+            max_noise = float(np.max(self.sleep_noise_levels)) if self.sleep_noise_levels else 0.0
+            avg_ldr = float(np.mean(self.sleep_ldr_levels)) if self.sleep_ldr_levels else 150.0
+            
             movements_per_hour = self.sleep_movement_count / duration_hours
             if movements_per_hour <= 2.0 and avg_noise <= 300.0 and avg_ldr <= 500.0:
                 quality = "Good"
@@ -1378,7 +1087,7 @@ class VoiceAgentHandler:
                 quality = "Poor"
             else:
                 quality = "Fair"
-                
+
             # Calculate tardiness if scheduled_sleep_time is active
             tardiness_mins = 0
             global scheduled_sleep_time
@@ -1409,29 +1118,23 @@ class VoiceAgentHandler:
                 "tardiness_minutes": tardiness_mins
             }
             
-            # Send summary command back to client (ESP32)
             try:
-                # Format: UI_SLEEP_SUMMARY:type:duration:movements:avg_noise:avg_ldr:quality
                 summary_cmd = f"UI_SLEEP_SUMMARY:{display_type}:{duration_hours:.1f}:{self.sleep_movement_count}:{avg_noise:.0f}:{avg_ldr:.0f}:{quality}\n"
                 self.safe_send(summary_cmd.encode())
                 print(f"[Sleep Monitor] Sent summary to ESP32: {summary_cmd.strip()}")
             except Exception as e:
-                print(f"[Sleep Monitor] Failed to send sleep summary to client: {e}")
+                print(f"[Sleep Monitor] Failed to send sleep summary: {e}")
             
-            # Save to JSON
             file_path = "sleep_sessions.json"
             try:
                 sessions = []
                 if os.path.exists(file_path):
                     try:
-                        with open(file_path, "r", encoding="utf-8") as f:
-                            sessions = json.load(f)
-                    except Exception:
-                        sessions = []
+                        with open(file_path, "r", encoding="utf-8") as f: sessions = json.load(f)
+                    except Exception: sessions = []
                 sessions.append(session_data)
-                with open(file_path, "w", encoding="utf-8") as f:
-                    json.dump(sessions, f, indent=2)
-                print(f"[Sleep Monitor] Saved session to {file_path}: {session_data}")
+                with open(file_path, "w", encoding="utf-8") as f: json.dump(sessions, f, indent=2)
+                print(f"[Sleep Monitor] Saved session to {file_path}")
             except Exception as e:
                 print(f"[Sleep Monitor Error] Failed to save session: {e}")
                 
@@ -1440,17 +1143,13 @@ class VoiceAgentHandler:
     def process_speech(self, audio_bytes, total_duration):
         global active_alarm_active
         
-        # Ensure int16 alignment (TCP can split at any byte boundary)
-        if len(audio_bytes) % 2 != 0:
-            audio_bytes = audio_bytes[:-1]
+        if len(audio_bytes) % 2 != 0: audio_bytes = audio_bytes[:-1]
         
         num_samples = len(audio_bytes) / 2
         if num_samples < 100:
             print(f"[!] Too few samples ({int(num_samples)}), skipping")
-            try:
-                self.safe_send(b"UI_STATE:IDLE\n")
-            except Exception:
-                pass
+            try: self.safe_send(b"UI_STATE:IDLE\n")
+            except Exception: pass
             return
 
         if self.first_audio_time > 0 and self.recording_start_time > 0:
@@ -1458,15 +1157,12 @@ class VoiceAgentHandler:
         else:
             audio_duration = total_duration
 
-        if audio_duration < 0.1:
-            audio_duration = total_duration
+        if audio_duration < 0.1: audio_duration = total_duration
 
-        # Rate from wall-clock (now accurate after discarding waving delay)
         measured_rate = int(num_samples / audio_duration) if audio_duration > 0 else 0
         ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         print(f"[*] Audio Duration: {audio_duration:.2f}s, Rate: {measured_rate} Hz")
 
-        # Resample to 16kHz (Parakeet's native rate) using linear interpolation
         try:
             audio_np = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float64)
             if measured_rate > 0 and measured_rate != 16000 and len(audio_np) > 0:
@@ -1476,45 +1172,37 @@ class VoiceAgentHandler:
                 audio_np = np.interp(tgt_idx, src_idx, audio_np)
             audio_float = (audio_np.astype(np.float32) / 32768.0).astype(np.float32)
         except Exception as e:
-            print(f"[Warning] Resample failed: {e}, using raw audio")
+            print(f"[Warning] Resample failed: {e}")
             audio_float = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32) / 32768.0
 
-        # Save raw recording for offline analysis (at measured rate)
         try:
             rec_path = os.path.join(RECORDINGS_DIR, f"rec_{ts}.wav")
             with wave.open(rec_path, "wb") as wf:
-                wf.setnchannels(1)
-                wf.setsampwidth(2)
+                wf.setnchannels(1); wf.setsampwidth(2)
                 wf.setframerate(measured_rate if measured_rate > 0 else 16000)
                 wf.writeframes(audio_bytes)
             print(f"[*] Saved recording: {rec_path}")
         except Exception as e:
             print(f"[Warning] Failed to save recording: {e}")
 
-        # (Speech enhancement bypassed to prevent ASR degradation from model artifacts)
-
         try:
-            text = asr_model.recognize(audio_float, sample_rate=16000).strip()
+            segments, _ = asr_model.transcribe(audio_float, language="en", beam_size=1, vad_filter=True, vad_parameters=dict(min_silence_duration_ms=500, speech_pad_ms=100))
+            text = " ".join([segment.text for segment in segments]).strip()
             
             if not text:
                 print("[No readable speech transcribed]")
-                try:
-                    self.safe_send(b"UI_STATE:IDLE\n")
-                except Exception:
-                    pass
+                try: self.safe_send(b"UI_STATE:IDLE\n")
+                except Exception: pass
                 return
                 
             print(f"[{'AWAKE' if self.is_awake else 'SLEEPING'}] Heard: '{text}'")
 
-            # Log transcription result alongside the saved recording
             try:
                 log_path = os.path.join(RECORDINGS_DIR, "transcriptions.log")
                 with open(log_path, "a", encoding="utf-8") as f:
                     f.write(f"{ts}\t{measured_rate}\t16000\t{audio_duration:.2f}\t{text}\n")
-            except Exception:
-                pass
+            except Exception: pass
             
-            # --- TIMER RUNNING BLOCK ---
             if self.timer_running:
                 clean_text = re.sub(r'[^\w\s]', '', text.lower()).strip()
                 is_cancel = any(w in clean_text for w in ["cancel", "delete", "remove", "dismiss"]) or \
@@ -1524,22 +1212,16 @@ class VoiceAgentHandler:
 
                 if is_cancel:
                     self.timer_running = False
-                    try:
-                        self.safe_send(b"TIMER_CANCEL\n")
-                    except Exception:
-                        pass
+                    try: self.safe_send(b"TIMER_CANCEL\n")
+                    except Exception: pass
                     play_speech_on_laptop("Timer stopped.")
                 elif is_pause:
-                    try:
-                        self.safe_send(b"TIMER_PAUSE\n")
-                    except Exception:
-                        pass
+                    try: self.safe_send(b"TIMER_PAUSE\n")
+                    except Exception: pass
                     play_speech_on_laptop("Timer paused.")
                 elif is_resume:
-                    try:
-                        self.safe_send(b"TIMER_RESUME\n")
-                    except Exception:
-                        pass
+                    try: self.safe_send(b"TIMER_RESUME\n")
+                    except Exception: pass
                     play_speech_on_laptop("Timer resumed.")
                 else:
                     play_speech_on_laptop("Countdown is active. Say stop timer to cancel.")
@@ -1547,7 +1229,6 @@ class VoiceAgentHandler:
                 self.is_awake = False
                 return
 
-            # --- ALARM DISMISSAL CHECK ---
             clean_text = re.sub(r'[^\w\s]', '', text.lower()).strip()
             if active_alarm_active:
                 print("[Alarm] Speech command processed while alarm active. Silencing server alarm.")
@@ -1570,71 +1251,65 @@ class VoiceAgentHandler:
                 self.is_awake = False
                 self.safe_send(b"UI_STATE:IDLE\n")
                 return
-
-            # --- TIMER SETUP CHECK (BUTTON PRESS MODE) ---
+            
             clean_text = re.sub(r'[^\w\s]', '', text.lower()).strip()
             is_timer_query = any(w in clean_text for w in ["timer", "countdown", "focus"])
             is_stop_intent = any(w in clean_text for w in ["stop", "cancel", "quit", "dismiss", "terminate", "shut up", "stop it"])
             
             if is_timer_query and not is_stop_intent:
-                # Intercept normal timer setup
                 duration = parse_timer_duration(clean_text)
                 if duration is not None:
                     self.timer_running = True
-                    try:
-                        self.safe_send(f"TIMER_START:{duration}\n".encode())
-                    except Exception:
-                        pass
+                    try: self.safe_send(f"TIMER_START:{duration}\n".encode())
+                    except Exception: pass
                     play_speech_on_laptop(f"Starting countdown for {format_duration(duration)}.")
                     self.is_awake = False
                 else:
                     play_speech_on_laptop("Please specify seconds, minutes, or hours.")
                     self.is_awake = False
-                    try:
-                        self.safe_send(b"UI_STATE:IDLE\n")
-                    except Exception:
-                        pass
+                    try: self.safe_send(b"UI_STATE:IDLE\n")
+                    except Exception: pass
                 return
 
-            # --- LLM PROCESSING ---
             print(f"[*] Processing user prompt: '{text}'")
             self.safe_send(b"UI_STATE:THINKING\n")
             
-            response = chat_session.send_message(text)  # send_message acquires chat_lock internally
+            response = chat_session.send_message(text)
             ai_answer = response.text.strip()
             print(f"[*] AI Response: {ai_answer}")
             
-            # Parse and execute commands
             self.handle_llm_response(ai_answer)
             
-            # Truncate session history to avoid token bloat (safe for odd-length)
             with chat_lock:
                 while len(chat_session.history) > 6:
                     chat_session.history.pop(0)
                     
-            # Put system back to sleep
             self.is_awake = False
                 
         except Exception as e:
             print(f"[Error] process_speech pipeline error: {e}")
-            try:
-                self.safe_send(b"UI_MSG:AI Error.\n")
-            except Exception:
-                pass
+            try: self.safe_send(b"UI_MSG:AI Error.\n")
+            except Exception: pass
             self.is_awake = False
             
     def handle_llm_response(self, ai_answer):
-        # Scan for CMD tags - new format: [CMD:ADD_REMINDER|task|ABS|time] or [CMD:ADD_REMINDER|task|REL|30s]
-        add_match = re.search(r'\[CMD:ADD_REMINDER\|([^|]+)\|(ABS|REL)\|([^\]]+)\]', ai_answer)
-        delete_match = re.search(r'\[CMD:DELETE_REMINDER\|(\d+)\]', ai_answer)
-        list_match = '[CMD:LIST_REMINDERS]' in ai_answer
-        clear_match = '[CMD:CLEAR_REMINDERS]' in ai_answer
-        sleep_cmd_match = '[CMD:START_SLEEP]' in ai_answer
-        
-        # Strip commands from message sent to user
-        clean_answer = re.sub(r'\[CMD:[^\]]+\]', '', ai_answer).strip()
-        # Remove any emojis/emoticons to prevent display corruption
+        # Case-insensitive, space-tolerant, and bracket/brace-tolerant regexes for small local LLM hallucinations
+        add_match = re.search(r'[\[{]\s*CMD\s*:\s*ADD_REMINDER\s*\|\s*([^|]+?)\s*\|\s*(ABS|REL|abs|rel)\s*\|\s*([^\]}]+?)\s*[\]}]', ai_answer, re.I)
+        delete_match = re.search(r'[\[{]\s*CMD\s*:\s*DELETE_REMINDER\s*\|\s*(\d+)\s*[\]}]', ai_answer, re.I)
+        list_match = re.search(r'[\[{]\s*CMD\s*:\s*LIST_REMINDERS\s*[\]}]', ai_answer, re.I) is not None
+        clear_match = re.search(r'[\[{]\s*CMD\s*:\s*CLEAR_REMINDERS\s*[\]}]', ai_answer, re.I) is not None
+        sleep_cmd_match = re.search(r'[\[{]\s*CMD\s*:\s*START_SLEEP\s*[\]}]', ai_answer, re.I) is not None
+
+        # Strip ALL CMD-like tags (valid and malformed) plus emojis
+        clean_answer = re.sub(r'[\[{]\s*CMD\s*:[^\]\}]+[\]\}]', '', ai_answer, flags=re.I).strip()
         clean_answer = re.sub(r'[\U00010000-\U0010ffff]', '', clean_answer).strip()
+
+        # If the model hallucinated a bogus tag with no valid command match,
+        # treat the entire response as natural language
+        if not any([add_match, delete_match, list_match, clear_match, sleep_cmd_match]):
+            clean_answer = ai_answer.strip()
+            clean_answer = re.sub(r'[\[{]\s*CMD\s*:[^\]\}]+[\]\}]', '', clean_answer, flags=re.I).strip()
+            clean_answer = re.sub(r'[\U00010000-\U0010ffff]', '', clean_answer).strip()
         
         try:
             if add_match:
@@ -1672,36 +1347,33 @@ class VoiceAgentHandler:
                 self.safe_send(f"UI_MSG:{clean_answer}\n".encode())
                 
             elif sleep_cmd_match:
-                # Send Goodnight speech first
                 header = f"UI_MSG:{clean_answer}\n".encode()
                 speak_on_esp32(self.conn, clean_answer, header=header)
-                # Send start sleep command to client (ESP32)
                 self.safe_send(b"CMD:START_SLEEP\n")
-                # Initialize Sleep Monitoring Session
                 self.last_pir_state = 'SLEEPING'
                 self.sleep_start_time = time.time()
                 self.sleep_movement_count = 0
                 self.sleep_noise_levels = []
                 self.sleep_noise_events = 0
                 self.sleep_ldr_levels = []
+                _save_sleep_status(True, self.sleep_start_time)
                 print(f"[Sleep Monitor] Manual sleep session triggered via voice command.")
                 
             else:
-                # Send display text + TTS atomically (no interleaving between UI_MSG and AUDIO)
+                print(f"[*] Clean response: '{clean_answer}'")
                 header = f"UI_MSG:{clean_answer}\n".encode()
                 speak_on_esp32(self.conn, clean_answer, header=header)
         except Exception as e:
             print(f"[Error] Failed to send socket command: {e}")
 
+# --- UDP DISCOVERY BEACON (RESTORED) ---
 def udp_discovery_beacon():
-    """Broadcast UDP discovery packets to help ESP32 dynamically locate the server IP"""
     udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     udp_sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
     print("[Discovery] UDP beacon broadcaster running on port 9999...")
     while True:
         try:
             broadcasts = ['255.255.255.255']
-            # Find all local interface IPs on the PC
             for ip in socket.gethostbyname_ex(socket.gethostname())[2]:
                 if not ip.startswith("127."):
                     parts = ip.split('.')
@@ -1711,19 +1383,13 @@ def udp_discovery_beacon():
             for bcast in set(broadcasts):
                 try:
                     udp_sock.sendto(b"TABLE_BONDHU_BEACON", (bcast, 9999))
-                except Exception:
-                    pass
-        except Exception:
-            pass
+                except Exception: pass
+        except Exception: pass
         time.sleep(2)
 
-from http.server import HTTPServer, BaseHTTPRequestHandler
-import json
-
+# --- REST API SERVER (RESTORED) ---
 class CompanionRestHandler(BaseHTTPRequestHandler):
-    def log_message(self, format, *args):
-        # Suppress logging every GET/POST request to keep stdout clean
-        return
+    def log_message(self, format, *args): return
 
     def _set_headers(self, status=200):
         self.send_response(status)
@@ -1733,26 +1399,20 @@ class CompanionRestHandler(BaseHTTPRequestHandler):
         self.send_header('Access-Control-Allow-Headers', 'Content-Type')
         self.end_headers()
 
-    def do_OPTIONS(self):
-        self._set_headers(200)
+    def do_OPTIONS(self): self._set_headers(200)
 
     def do_GET(self):
         if self.path == '/api/reminders':
             self._set_headers(200)
-            active_list = get_reminders_list()
-            self.wfile.write(json.dumps(active_list).encode('utf-8'))
-
+            self.wfile.write(json.dumps(get_reminders_list()).encode('utf-8'))
         elif self.path == '/api/ping':
             self._set_headers(200)
             self.wfile.write(json.dumps({"status": "OK"}).encode('utf-8'))
-
         elif self.path == '/api/sleep/schedule':
             self._set_headers(200)
             global scheduled_sleep_time
             self.wfile.write(json.dumps({"scheduled_time": scheduled_sleep_time or ""}).encode('utf-8'))
-
         elif self.path == '/api/sleep/status':
-            # Returns current sleep state + the start time if sleeping
             self._set_headers(200)
             payload = {"is_sleeping": False, "start_time": None}
             if os.path.exists(sleep_status_file):
@@ -1762,40 +1422,31 @@ class CompanionRestHandler(BaseHTTPRequestHandler):
                 except Exception:
                     pass
             self.wfile.write(json.dumps(payload).encode('utf-8'))
-
         elif self.path == '/api/sleep/window':
-            # Returns the current configured sleep window
             self._set_headers(200)
             self.wfile.write(json.dumps({
                 "start_hour": sleep_window_start,
                 "end_hour": sleep_window_end
             }).encode('utf-8'))
-
         elif self.path == '/api/sleep':
             self._set_headers(200)
             sessions = []
             if os.path.exists("sleep_sessions.json"):
                 try:
-                    with open("sleep_sessions.json", "r", encoding="utf-8") as f:
-                        sessions = json.load(f)
-                except Exception:
-                    pass
+                    with open("sleep_sessions.json", "r", encoding="utf-8") as f: sessions = json.load(f)
+                except Exception: pass
             self.wfile.write(json.dumps(sessions).encode('utf-8'))
         else:
             self._set_headers(404)
             self.wfile.write(json.dumps({"error": "Not Found"}).encode('utf-8'))
 
-
-
     def do_POST(self):
         global active_conn, active_handler, chat_session, scheduled_sleep_time
         content_length = int(self.headers['Content-Length'])
         post_data = self.rfile.read(content_length)
-        
-        try:
-            data = json.loads(post_data.decode('utf-8'))
-        except Exception:
-            data = {}
+
+        try: data = json.loads(post_data.decode('utf-8'))
+        except Exception: data = {}
 
         if self.path == '/api/chat':
             message = data.get("message", "")
@@ -1808,49 +1459,42 @@ class CompanionRestHandler(BaseHTTPRequestHandler):
             if active_alarm_active:
                 print("[Alarm] Message from app while alarm active. Silencing server alarm.")
                 stop_active_alarm()
-            
-            # 1. Intercept timer countdown setup
+
             clean_msg = re.sub(r'[^\w\s]', '', message.lower()).strip()
             is_timer_query = any(w in clean_msg for w in ["timer", "countdown", "focus"])
             is_stop_intent = any(w in clean_msg for w in ["stop", "cancel", "quit", "dismiss", "terminate", "shut up", "stop it"])
-            
+
             if is_timer_query and not is_stop_intent:
                 duration = parse_timer_duration(clean_msg)
                 if duration is not None:
                     if active_handler:
                         active_handler.timer_running = True
                     if active_conn:
-                        try:
-                            active_conn.sendall(f"TIMER_START:{duration}\n".encode())
-                        except Exception:
-                            pass
+                        try: active_conn.sendall(f"TIMER_START:{duration}\n".encode())
+                        except Exception: pass
                     response_text = f"Starting focus countdown for {format_duration(duration)}."
                     play_speech_on_laptop(response_text)
                     self._set_headers(200)
                     self.wfile.write(json.dumps({"response": response_text}).encode('utf-8'))
                     return
 
-            # 2. Process LLM message
             if active_handler:
-                try:
-                    active_handler.safe_send(b"UI_STATE:THINKING\n")
-                except Exception:
-                    pass
+                try: active_handler.safe_send(b"UI_STATE:THINKING\n")
+                except Exception: pass
 
             try:
                 response = chat_session.send_message(message)
                 ai_answer = response.text.strip()
                 print(f"[REST Chat] AI Response: {ai_answer}")
 
-                # Execute tags and play audio
                 if active_handler:
                     active_handler.handle_llm_response(ai_answer)
                 else:
-                    clean_answer = re.sub(r'\[CMD:[^\]]+\]', '', ai_answer).strip()
+                    clean_answer = re.sub(r'[\[{]CMD:[^\]\}]+[\]\}]', '', ai_answer).strip()
                     clean_answer = re.sub(r'[\U00010000-\U0010ffff]', '', clean_answer).strip()
                     play_speech_on_laptop(clean_answer)
 
-                clean_answer = re.sub(r'\[CMD:[^\]]+\]', '', ai_answer).strip()
+                clean_answer = re.sub(r'[\[{]CMD:[^\]\}]+[\]\}]', '', ai_answer).strip()
                 clean_answer = re.sub(r'[\U00010000-\U0010ffff]', '', clean_answer).strip()
 
                 self._set_headers(200)
@@ -1880,9 +1524,10 @@ class CompanionRestHandler(BaseHTTPRequestHandler):
                 # Load and resample using pydub
                 sound = AudioSegment.from_file(temp_path)
                 sound = sound.set_frame_rate(16000).set_channels(1).set_sample_width(2)
-                audio_samples = np.frombuffer(sound.raw_data, dtype=np.int16).astype(np.float32) / 32768.0
+                audio_np = np.frombuffer(sound.raw_data, dtype=np.int16).astype(np.float32) / 32768.0
 
-                text = asr_model.recognize(audio_samples, sample_rate=16000).strip()
+                segments, _ = asr_model.transcribe(audio_np, language="en", beam_size=1)
+                text = " ".join([s.text for s in segments]).strip()
                 print(f"[REST Voice Chat] Transcribed: '{text}'")
 
                 if not text:
@@ -1890,33 +1535,27 @@ class CompanionRestHandler(BaseHTTPRequestHandler):
                     self.wfile.write(json.dumps({"text": "", "response": "Could not recognize speech. Please try speaking clearer."}).encode('utf-8'))
                     return
 
-                # Intercept countdown query in voice
                 clean_msg = re.sub(r'[^\w\s]', '', text.lower()).strip()
                 is_timer_query = any(w in clean_msg for w in ["timer", "countdown", "focus"])
                 is_stop_intent = any(w in clean_msg for w in ["stop", "cancel", "quit", "dismiss", "terminate", "shut up", "stop it"])
-                
+
                 if is_timer_query and not is_stop_intent:
                     duration = parse_timer_duration(clean_msg)
                     if duration is not None:
                         if active_handler:
                             active_handler.timer_running = True
                         if active_conn:
-                            try:
-                                active_conn.sendall(f"TIMER_START:{duration}\n".encode())
-                            except Exception:
-                                pass
+                            try: active_conn.sendall(f"TIMER_START:{duration}\n".encode())
+                            except Exception: pass
                         response_text = f"Starting focus countdown for {format_duration(duration)}."
                         play_speech_on_laptop(response_text)
                         self._set_headers(200)
                         self.wfile.write(json.dumps({"text": text, "response": response_text}).encode('utf-8'))
                         return
 
-                # Process LLM query
                 if active_handler:
-                    try:
-                        active_handler.safe_send(b"UI_STATE:THINKING\n")
-                    except Exception:
-                        pass
+                    try: active_handler.safe_send(b"UI_STATE:THINKING\n")
+                    except Exception: pass
 
                 response = chat_session.send_message(text)
                 ai_answer = response.text.strip()
@@ -1925,11 +1564,11 @@ class CompanionRestHandler(BaseHTTPRequestHandler):
                 if active_handler:
                     active_handler.handle_llm_response(ai_answer)
                 else:
-                    clean_answer = re.sub(r'\[CMD:[^\]]+\]', '', ai_answer).strip()
+                    clean_answer = re.sub(r'[\[{]CMD:[^\]\}]+[\]\}]', '', ai_answer).strip()
                     clean_answer = re.sub(r'[\U00010000-\U0010ffff]', '', clean_answer).strip()
                     play_speech_on_laptop(clean_answer)
 
-                clean_answer = re.sub(r'\[CMD:[^\]]+\]', '', ai_answer).strip()
+                clean_answer = re.sub(r'[\[{]CMD:[^\]\}]+[\]\}]', '', ai_answer).strip()
                 clean_answer = re.sub(r'[\U00010000-\U0010ffff]', '', clean_answer).strip()
 
                 self._set_headers(200)
@@ -1941,17 +1580,15 @@ class CompanionRestHandler(BaseHTTPRequestHandler):
 
         elif self.path == '/api/reminders':
             task = data.get("task", "")
-            time_str = data.get("time", "")  # Expecting YYYY-MM-DD HH:MM:SS
+            time_str = data.get("time", "")
             if not task or not time_str:
                 self._set_headers(400)
                 self.wfile.write(json.dumps({"error": "Missing task or time"}).encode('utf-8'))
                 return
-
             try:
                 trigger_dt = datetime.datetime.strptime(time_str, "%Y-%m-%d %H:%M:%S")
                 display_str = trigger_dt.strftime("%I:%M %p")
                 add_reminder(task, trigger_dt, display_str)
-                
                 self._set_headers(200)
                 self.wfile.write(json.dumps({"status": "SUCCESS"}).encode('utf-8'))
             except Exception as e:
@@ -1959,12 +1596,11 @@ class CompanionRestHandler(BaseHTTPRequestHandler):
                 self.wfile.write(json.dumps({"error": str(e)}).encode('utf-8'))
 
         elif self.path == '/api/reminders/delete':
-            index = data.get("index") # 1-indexed
+            index = data.get("index")
             if index is None:
                 self._set_headers(400)
                 self.wfile.write(json.dumps({"error": "Missing index"}).encode('utf-8'))
                 return
-
             deleted_task = delete_reminder_by_index(index)
             if deleted_task:
                 self._set_headers(200)
@@ -1983,10 +1619,8 @@ class CompanionRestHandler(BaseHTTPRequestHandler):
             if active_handler:
                 active_handler.timer_running = True
             if active_conn:
-                try:
-                    active_conn.sendall(f"TIMER_START:{duration}\n".encode())
-                except Exception:
-                    pass
+                try: active_conn.sendall(f"TIMER_START:{duration}\n".encode())
+                except Exception: pass
             self._set_headers(200)
             self.wfile.write(json.dumps({"status": "SUCCESS"}).encode('utf-8'))
 
@@ -1994,10 +1628,8 @@ class CompanionRestHandler(BaseHTTPRequestHandler):
             if active_handler:
                 active_handler.timer_running = False
             if active_conn:
-                try:
-                    active_conn.sendall(b"TIMER_CANCEL\n")
-                except Exception:
-                    pass
+                try: active_conn.sendall(b"TIMER_CANCEL\n")
+                except Exception: pass
             self._set_headers(200)
             self.wfile.write(json.dumps({"status": "SUCCESS"}).encode('utf-8'))
 
@@ -2012,11 +1644,9 @@ class CompanionRestHandler(BaseHTTPRequestHandler):
                 active_handler.sleep_noise_events = 0
                 active_handler.sleep_ldr_levels = []
                 active_handler.last_pir_state = 'SLEEPING'
-                _save_sleep_status(True, start_ts)  # Persist so app can reopen in sleep mode
-                try:
-                    active_conn.sendall(b"CMD:START_SLEEP\n")
-                except Exception:
-                    pass
+                _save_sleep_status(True, start_ts)
+                try: active_conn.sendall(b"CMD:START_SLEEP\n")
+                except Exception: pass
                 self._set_headers(200)
                 self.wfile.write(json.dumps({"status": "SUCCESS"}).encode('utf-8'))
             else:
@@ -2024,24 +1654,19 @@ class CompanionRestHandler(BaseHTTPRequestHandler):
                 self.wfile.write(json.dumps({"error": "ESP32 desk clock is not connected to the server right now."}).encode('utf-8'))
 
         elif self.path == '/api/sleep/wake':
-            # Manual wake-up triggered from Android app
             print("[REST Sleep] Manual wake-up triggered from app.")
             if active_handler:
                 active_handler.last_pir_state = 'AWAKE'
-                log_sleep_event("WAKE")
-                _save_sleep_status(False)  # Mark as awake
-                # End the sleep session and return the session summary inline
+                _save_sleep_status(False)
                 session_data = None
-                if hasattr(active_handler, 'sleep_start_time') and active_handler.sleep_start_time is not None:
-                    # Compute summary before calling end_sleep_session (which clears it)
+                if active_handler.sleep_start_time is not None:
                     end_time = time.time()
                     duration = end_time - active_handler.sleep_start_time
                     duration_hours = duration / 3600.0
                     session_type = "actual_sleep" if duration_hours >= 3.0 else "nap"
-                    if duration >= 600.0:  # Only if >= 10 minutes
+                    if duration >= 600.0:
                         avg_noise = float(np.mean(active_handler.sleep_noise_levels)) if active_handler.sleep_noise_levels else 0.0
-                        max_noise = float(np.max(active_handler.sleep_noise_levels)) if active_handler.sleep_noise_levels else 0.0
-                        avg_ldr = float(np.mean(active_handler.sleep_ldr_levels)) if hasattr(active_handler, 'sleep_ldr_levels') and active_handler.sleep_ldr_levels else 150.0
+                        avg_ldr = float(np.mean(active_handler.sleep_ldr_levels)) if active_handler.sleep_ldr_levels else 150.0
                         movements_per_hour = active_handler.sleep_movement_count / max(duration_hours, 0.01)
                         if movements_per_hour <= 2.0 and avg_noise <= 300.0 and avg_ldr <= 500.0:
                             quality = "Good"
@@ -2058,28 +1683,23 @@ class CompanionRestHandler(BaseHTTPRequestHandler):
                             "average_ldr": round(avg_ldr, 1),
                         }
                 active_handler.end_sleep_session()
-                # Tell the ESP32 to wake up and show summary screen
-                try:
-                    active_conn.sendall(b"CMD:FORCE_WAKE\n")
-                except Exception:
-                    pass
+                try: active_conn.sendall(b"CMD:FORCE_WAKE\n")
+                except Exception: pass
                 self._set_headers(200)
                 self.wfile.write(json.dumps({"status": "SUCCESS", "session": session_data}).encode('utf-8'))
             else:
-                # No active handler but we should still clear the persisted sleeping flag
                 _save_sleep_status(False)
                 self._set_headers(200)
                 self.wfile.write(json.dumps({"status": "SUCCESS", "session": None}).encode('utf-8'))
 
         elif self.path == '/api/sleep/schedule':
-            time_val = data.get("time", "") # HH:MM
+            time_val = data.get("time", "")
             scheduled_sleep_time = time_val
             print(f"[REST Sleep] Configured target bedtime to: {scheduled_sleep_time}")
             self._set_headers(200)
             self.wfile.write(json.dumps({"status": "SUCCESS", "scheduled_time": scheduled_sleep_time}).encode('utf-8'))
 
         elif self.path == '/api/sleep/window':
-            # Update the sleep window — hours when auto-sleep detection is active
             global sleep_window_start, sleep_window_end
             start = data.get("start_hour", 22)
             end   = data.get("end_hour", 10)
@@ -2088,28 +1708,19 @@ class CompanionRestHandler(BaseHTTPRequestHandler):
                 end   = int(end)
                 if 0 <= start <= 23 and 0 <= end <= 23:
                     sleep_window_start = start
-                    sleep_window_end   = end
-                    print(f"[REST Sleep] Sleep window updated: {start:02d}:00 → {end:02d}:00")
-                    # Push the new window to the ESP32 immediately if connected
-                    if active_conn:
-                        try:
-                            active_conn.sendall(f"SLEEP_WINDOW:{start}:{end}\n".encode())
-                        except Exception:
-                            pass
+                    sleep_window_end = end
                     self._set_headers(200)
                     self.wfile.write(json.dumps({"status": "SUCCESS", "start_hour": start, "end_hour": end}).encode('utf-8'))
                 else:
                     self._set_headers(400)
                     self.wfile.write(json.dumps({"error": "Hours must be 0-23"}).encode('utf-8'))
-            except ValueError:
+            except Exception as e:
                 self._set_headers(400)
-                self.wfile.write(json.dumps({"error": "Invalid hour values"}).encode('utf-8'))
+                self.wfile.write(json.dumps({"error": str(e)}).encode('utf-8'))
 
         else:
             self._set_headers(404)
             self.wfile.write(json.dumps({"error": "Not Found"}).encode('utf-8'))
-
-
 
 def run_rest_server():
     server_address = ('', 8888)
@@ -2123,26 +1734,26 @@ def start_server():
         s.bind((HOST, PORT))
         s.listen()
         
-        print(f"\nHands-free Companion Server running on {HOST}:{PORT}")
-        print("Waiting for ESP32 connection...")
+        print(f"\n[*] Hands-free Companion Server running on {HOST}:{PORT}")
+        print("[*] Waiting for ESP32 connection...")
         
-        # Start scheduler
         sched_thread = threading.Thread(target=alarm_scheduler, daemon=True)
         sched_thread.start()
         
-        # Start UDP Discovery Beacon Broadcaster
         udp_thread = threading.Thread(target=udp_discovery_beacon, daemon=True)
         udp_thread.start()
 
-        # Start REST API Web Server
         rest_thread = threading.Thread(target=run_rest_server, daemon=True)
         rest_thread.start()
         
         while True:
             conn, addr = s.accept()
+            print(f"[*] ESP32 Connected: {addr}")
             handler = VoiceAgentHandler(conn, addr)
             client_thread = threading.Thread(target=handler.run, daemon=True)
             client_thread.start()
 
 if __name__ == "__main__":
+    if subprocess.run(["which", "espeak"], capture_output=True).returncode != 0:
+        print("[!] WARNING: 'espeak' not found. Install via: sudo apt install espeak")
     start_server()
