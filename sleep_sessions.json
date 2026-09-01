@@ -1,0 +1,30 @@
+[
+  {
+    "session_id": "20260716_154934",
+    "type": "nap",
+    "start_time": "2026-07-16 15:49:34",
+    "end_time": "2026-07-16 16:02:22",
+    "duration_hours": 0.21,
+    "movement_count": 0,
+    "average_noise": 5660.4,
+    "max_noise": 19753.5,
+    "noise_events": 15045,
+    "average_ldr": 510.4,
+    "quality": "Poor",
+    "tardiness_minutes": 0
+  },
+  {
+    "session_id": "20260716_160320",
+    "type": "nap",
+    "start_time": "2026-07-16 16:03:20",
+    "end_time": "2026-07-16 16:23:21",
+    "duration_hours": 0.33,
+    "movement_count": 0,
+    "average_noise": 4939.6,
+    "max_noise": 20113.2,
+    "noise_events": 68301,
+    "average_ldr": 506.2,
+    "quality": "Poor",
+    "tardiness_minutes": 0
+  }
+]

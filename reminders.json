@@ -38,7 +38,7 @@
     "task": "dinner",
     "trigger_time": "2026-07-16T17:00:00",
     "display_time": "5:00 PM",
-    "fired": false,
+    "fired": true,
     "created": "2026-07-16T13:40:45.531956"
   },
   {
@@ -47,5 +47,12 @@
     "display_time": "9:00 PM",
     "fired": false,
     "created": "2026-07-16T13:41:00.674338"
+  },
+  {
+    "task": "Alarm",
+    "trigger_time": "2026-07-16T16:37:22.593271",
+    "display_time": "in 10 seconds",
+    "fired": true,
+    "created": "2026-07-16T16:37:12.593894"
   }
 ]

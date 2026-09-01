@@ -2,43 +2,59 @@
 
 ```
 Table-Bondhu-main/
-├── agentic_companion.py          # Python TCP server (1291 lines)
-├── gemini_LLM_btn/               # ESP32 Arduino firmware
-│   ├── gemini_LLM_btn.ino        # Main sketch (1568 lines)
-│   ├── config.h                  # WiFi & server config
-│   └── images.h                  # Avatar bitmap data (~26K lines)
-├── models/                       # AI model files
-│   └── vits-piper-en_US-amy-low/ # VITS TTS model (offline)
-│       ├── en_US-amy-low.onnx    # Model weights
-│       ├── en_US-amy-low.onnx.json
-│       ├── tokens.txt
-│       └── espeak-ng-data/       # Phoneme data
-├── assets/                       # Source artwork (for regeneration)
-│   ├── Pikachu/                  # Pikachu avatar PNGs (14 files)
-│   └── girl/                     # Girl avatar JPGs/PNGs (13 files)
-├── docs/                         # Documentation
-│   ├── README.md                 # Project overview
-│   ├── STRUCTURE.md              # This file
-│   ├── API.md                    # TCP protocol reference
-│   └── codebase/                 # Implementation details
-├── check_api.py                  # LM Studio diagnostic tool
-├── requirements.txt              # Python dependencies
-├── reminders.json                # Runtime reminder data (auto-created)
+├── README.md                     # Master project overview & showcase
+├── agentic_companion.py          # Python TCP/REST AI backend server
+├── agentic_companion_raspberrypi_4.py # Optimized backend for Raspberry Pi 4
+├── check_api.py                  # LM Studio connectivity diagnostic
+├── requirements.txt              # Python backend dependencies
+├── reminders.json                # Runtime reminder/alarm data
+├── sleep_sessions.json           # Recorded sleep sessions & hygiene logs
+├── sleep_status.json             # Real-time sleep monitor state
 ├── SETUP.md                      # Environment setup guide
-├── COMPANION_GUIDE.md            # User usage guide
+├── COMPANION_GUIDE.md            # User usage guide & mobile app overview
 ├── Table_Bondhu_Project_Guide.pdf
 ├── LICENSE
 ├── .gitignore
-└── .vscode/                      # Arduino IDE config
+├── .vscode/                      # Arduino / IDE configuration
+│
+├── gemini_LLM_btn/               # Primary ESP32 Arduino firmware
+│   ├── gemini_LLM_btn.ino        # Main sketch & UI state machine
+│   ├── config.h                  # WiFi & server credentials
+│   └── images.h                  # Avatar bitmap data (RGB565)
+│
+├── table_bondhu_app/             # Flutter Companion Mobile App (Android)
+│   ├── lib/main.dart             # App UI, PTT voice chat, sleep charts & AP config
+│   ├── assets/                   # App graphic assets
+│   └── pubspec.yaml              # Flutter dependencies
+│
+├── modular_files/                # Modularized codebase refactor
+│   ├── arduino_clock/            # Separated Arduino modules (.ino / .h)
+│   ├── python_server/            # Separated Python modules (audio, speech, sleep)
+│   └── DEMO_GUIDE.md             # Live evaluation presentation guide
+│
+├── assets/                       # Visual assets & project photography
+│   ├── Project Photos/           # Real hardware photos (top_view, clock, talk, etc.)
+│   ├── Pikachu/                  # Pikachu avatar frames
+│   └── girl/                     # Girl avatar frames
+│
+└── docs/                         # Comprehensive documentation suite
+    ├── README.md                 # Docs summary
+    ├── STRUCTURE.md              # Codebase structure & component breakdown (this file)
+    ├── API.md                    # TCP/REST Protocol reference
+    ├── SETUP.md                  # Setup walkthrough
+    ├── COMPANION_GUIDE.md        # Feature manual
+    └── TEACHER_QA_GUIDE.md       # Viva exam & academic evaluation Q&A guide
 ```
 
 ## Entry Points
 
 | Component | Entry File | How to Run |
 |-----------|-----------|------------|
-| Python server | `agentic_companion.py` | `python agentic_companion.py` |
-| ESP32 firmware | `gemini_LLM_btn/gemini_LLM_btn.ino` | Flash via Arduino IDE |
-| LM Studio check | `check_api.py` | `python check_api.py` |
+| Python Server (Host) | `agentic_companion.py` | `python agentic_companion.py` |
+| Python Server (RPi 4) | `agentic_companion_raspberrypi_4.py` | `python agentic_companion_raspberrypi_4.py` |
+| ESP32 Firmware | `gemini_LLM_btn/gemini_LLM_btn.ino` | Flash via Arduino IDE |
+| Flutter Mobile App | `table_bondhu_app/lib/main.dart` | `flutter run` in `table_bondhu_app/` |
+| LM Studio Check | `check_api.py` | `python check_api.py` |
 
 ## Module Map (agentic_companion.py)
 
