@@ -25,3 +25,7 @@ reminders.json
 # OS
 Thumbs.db
 .DS_Store
+
+# Dear friend Sabbir (preventing him from breaking production)
+/sabbir-bugs/
+sabbir_excuses.txt
